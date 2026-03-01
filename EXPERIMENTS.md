@@ -466,6 +466,63 @@ python scripts/run_portfolio.py --products salmon_fillet sushi salad_mix \
 
 ---
 
+## Iteration 10: Sample Efficiency — Replay Ratio + Bigger Buffer/Batch
+
+**Goal**: Match v0.8's 43% beats-baseline with half the episodes (1500 instead of 3000) by extracting more learning per episode via higher replay ratio, bigger batch, and bigger buffer.
+
+**Changes**:
+- Added `replay_ratio` parameter to `train()` and `run_portfolio.py` — gradient steps per environment step (default 1)
+- Added `batch_size` parameter (default 32) — configurable instead of hardcoded
+- Added `buffer_size` parameter (default 10000) — configurable instead of hardcoded
+- Threaded all three through `_pretrain_category()`, `_run_single_product()`, CLI flags, header, and history JSON
+
+**Hypothesis**: The training loop does exactly 1 gradient step per env step. Increasing to 4 means 4x more learning from each transition. Combined with bigger buffer (retain more diverse data) and bigger batch (more stable gradients with higher replay ratio), we can converge faster.
+
+**Setup (v090)**: 2h steps, **1500 episodes** (half of v0.8), PER + prefill, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, 16 workers
+
+| Setting | v0.8 | v0.9 |
+|---------|------|------|
+| Episodes | 3000 | **1500** |
+| Replay ratio | 1 | **4** |
+| Batch size | 32 | **64** |
+| Buffer size | 10,000 | **50,000** |
+| Prefill episodes | 200 | **500** |
+| Warmup steps | 1000 | **2000** |
+
+### Results
+
+| Metric | v0.8 (3000ep, rr=1) | v0.9 (1500ep, rr=4) |
+|--------|---------------------|---------------------|
+| Shaping wins | 63/110 (57%) | 58/110 (53%) |
+| Beats best baseline | **47/110 (43%)** | 16/110 (15%) |
+| Runtime (16 workers) | 34.1 min | 66.8 min |
+
+**Category breakdown (shaping win %)**:
+
+| Category | v0.8 | v0.9 |
+|----------|------|------|
+| legacy | **80%** | **80%** |
+| meats | 47% | **67%** |
+| seafood | **60%** | **60%** |
+| fruits | 47% | **53%** |
+| bakery | **60%** | 47% |
+| dairy | 47% | 47% |
+| vegetables | **73%** | 47% |
+| deli_prepared | **60%** | 40% |
+
+### Analysis
+
+1. **Beats-baseline collapsed**: 43% → 15%. Higher replay ratio did not compensate for halving online episodes. The agent needs real environment interactions to discover good strategies — replaying the same transitions more times has sharply diminishing returns.
+2. **Shaping win rate held steady** (53% vs 57%): The shaped/plain comparison is robust across training budgets, confirming shaping provides a consistent relative advantage.
+3. **Runtime nearly doubled** (34.1 → 66.8 min): 4x gradient steps per env step made each episode ~4x more expensive computationally, while halving episodes only saved 2x — net slowdown of ~2x.
+4. **Meats improved** (+20pp shaping win rate) but vegetables (-26pp), bakery (-13pp), and deli_prepared (-20pp) all regressed significantly.
+
+**Learning**: **Online exploration is the bottleneck, not sample efficiency.** Replay ratio increases how much you learn from existing data, but cannot substitute for collecting new, diverse experiences. The agent at 1500 episodes simply hasn't seen enough distinct environment trajectories to learn robust policies, regardless of how many gradient steps it takes on those trajectories. This is consistent with RL theory — replay ratio helps most when transitions are expensive to collect (robotics, real-world systems), but in fast simulators like ours, it's cheaper to just collect more data.
+
+The replay ratio / batch size / buffer size parameters remain available for future use (e.g., if we move to real-world data collection), but for this simulator the clear winning formula is: **more episodes + bigger network** (Iteration 9).
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps
@@ -505,3 +562,4 @@ Shaping is neutral/noise when:
 | DQN generates less raw revenue than baselines | Expected — DQN optimizes total reward (revenue minus waste), not revenue alone |
 | TL + long fine-tuning (1500ep) | Shaping advantage disappears as plain DQN also fully converges — use shorter fine-tuning (500-800ep) to preserve the TL benefit |
 | TL + very long fine-tuning (3000ep) | TL slightly hurts vs no-TL (40% vs 43% beats-baseline) — category pre-training can introduce interference with enough direct training |
+| High replay ratio to halve episodes (rr=4, 1500ep) | Online exploration is the bottleneck, not sample efficiency — 15% beats-baseline vs 43% with rr=1 at 3000ep, and 2x slower |
