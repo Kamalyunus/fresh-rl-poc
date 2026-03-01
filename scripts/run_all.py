@@ -19,8 +19,7 @@ from scripts.visualize import generate_all_plots
 
 def main():
     parser = argparse.ArgumentParser(description="Run complete Markdown Channel RL pipeline")
-    parser.add_argument("--product", type=str, default="salad_mix",
-                        choices=["salad_mix", "fresh_chicken", "yogurt", "bakery_bread", "sushi"])
+    parser.add_argument("--product", type=str, default="salad_mix")
     parser.add_argument("--episodes", type=int, default=1000)
     parser.add_argument("--eval-episodes", type=int, default=200)
     parser.add_argument("--step-hours", type=int, default=4, choices=[2, 4],

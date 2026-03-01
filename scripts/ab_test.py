@@ -198,8 +198,7 @@ def _plot_ab_comparison(ab_results, product, save_dir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="A/B test: 4h vs 2h step configurations")
-    parser.add_argument("--product", type=str, default="salad_mix",
-                        choices=["salad_mix", "fresh_chicken", "yogurt", "bakery_bread", "sushi"])
+    parser.add_argument("--product", type=str, default="salad_mix")
     parser.add_argument("--episodes", type=int, default=500, help="Training episodes per config")
     parser.add_argument("--eval-episodes", type=int, default=200, help="Evaluation episodes per config")
     parser.add_argument("--reward-shaping", action="store_true", help="Enable reward shaping")

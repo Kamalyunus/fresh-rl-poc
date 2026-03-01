@@ -274,8 +274,9 @@ def train(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train DQN agent for markdown channel discounting")
     parser.add_argument("--episodes", type=int, default=1000, help="Number of training episodes")
-    parser.add_argument("--product", type=str, default="salad_mix",
-                        choices=["salad_mix", "fresh_chicken", "yogurt", "bakery_bread", "sushi"])
+    parser.add_argument("--product", type=str, default="salad_mix")
+    parser.add_argument("--list-products", action="store_true",
+                        help="List all available products and exit")
     parser.add_argument("--step-hours", type=int, default=4, choices=[2, 4],
                         help="Hours per decision step (2 or 4)")
     parser.add_argument("--reward-shaping", action="store_true", help="Enable reward shaping")
@@ -302,6 +303,11 @@ if __name__ == "__main__":
                         help="Shaping strength relative to revenue scale (default: 0.2)")
 
     args = parser.parse_args()
+
+    if args.list_products:
+        from fresh_rl.product_catalog import print_catalog_summary
+        print_catalog_summary()
+        sys.exit(0)
 
     train(
         n_episodes=args.episodes,

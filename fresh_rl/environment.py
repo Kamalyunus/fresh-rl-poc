@@ -311,8 +311,9 @@ class MarkdownProductEnv(MarkdownChannelEnv):
     def __init__(self, product_name: str = "salad_mix", **kwargs):
         if product_name in self.PRODUCT_PROFILES:
             profile = self.PRODUCT_PROFILES[product_name].copy()
-            profile.update(kwargs)  # allow overrides
-            super().__init__(**profile)
         else:
-            super().__init__(**kwargs)
+            from fresh_rl.product_catalog import get_profile
+            profile = get_profile(product_name)
+        profile.update(kwargs)  # allow overrides
+        super().__init__(**profile)
         self.product_name = product_name
