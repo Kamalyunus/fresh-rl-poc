@@ -45,6 +45,9 @@ def _pretrain_category(
     inventory_mult,
     epsilon_decay,
     hidden_dim=64,
+    replay_ratio=1,
+    batch_size=32,
+    buffer_size=10000,
 ):
     """Pre-train one agent on all products in a category."""
     from fresh_rl.environment import MarkdownProductEnv
@@ -63,7 +66,7 @@ def _pretrain_category(
         state_dim=state_dim, n_actions=n_actions, hidden_dim=hidden_dim,
         lr=5e-4, gamma=0.97, epsilon_start=1.0, epsilon_end=0.05,
         epsilon_decay=epsilon_decay or 0.999,
-        buffer_size=10000, batch_size=32,
+        buffer_size=buffer_size, batch_size=batch_size,
         reward_shaping=False,  # no shaping during pre-training
         seed=seed, use_per=use_per,
     )
@@ -93,7 +96,8 @@ def _pretrain_category(
             done = terminated or truncated
             next_mask = env.action_masks() if not done else np.ones(n_actions, dtype=bool)
             agent.store_transition(obs, action, reward, next_obs, done, next_mask)
-            agent.train_step_fn()
+            for _ in range(replay_ratio):
+                agent.train_step_fn()
             obs = next_obs
 
         agent.decay_epsilon()
@@ -126,6 +130,9 @@ def _run_single_product(
     epsilon_decay: float = None,
     pretrained_path: str = None,
     hidden_dim: int = 64,
+    replay_ratio: int = 1,
+    batch_size: int = 32,
+    buffer_size: int = 10000,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -160,6 +167,9 @@ def _run_single_product(
         env_overrides=env_overrides if env_overrides else None,
         epsilon_decay=epsilon_decay,
         hidden_dim=hidden_dim,
+        replay_ratio=replay_ratio,
+        batch_size=batch_size,
+        buffer_size=buffer_size,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -500,6 +510,12 @@ def main():
                         help="Epsilon decay rate per episode (default: 0.998 for 2h, 0.997 for 4h)")
     parser.add_argument("--hidden-dim", type=int, default=64,
                         help="Hidden layer size for DQN network (default: 64)")
+    parser.add_argument("--replay-ratio", type=int, default=1,
+                        help="Gradient steps per environment step (default: 1)")
+    parser.add_argument("--batch-size", type=int, default=32,
+                        help="Batch size for DQN training (default: 32)")
+    parser.add_argument("--buffer-size", type=int, default=10000,
+                        help="Replay buffer size (default: 10000)")
 
     # Transfer learning
     parser.add_argument("--transfer-learning", action="store_true",
@@ -547,6 +563,9 @@ def main():
     print(f"  Step hours:     {args.step_hours}h")
     print(f"  Shaping ratio:  {args.shaping_ratio}")
     print(f"  Hidden dim:     {args.hidden_dim}")
+    print(f"  Replay ratio:   {args.replay_ratio}")
+    print(f"  Batch size:     {args.batch_size}")
+    print(f"  Buffer size:    {args.buffer_size}")
     if args.demand_mult != 1.0:
         print(f"  Demand mult:    {args.demand_mult}x")
     if args.inventory_mult != 1.0:
@@ -572,6 +591,9 @@ def main():
         inventory_mult=args.inventory_mult,
         epsilon_decay=args.epsilon_decay,
         hidden_dim=args.hidden_dim,
+        replay_ratio=args.replay_ratio,
+        batch_size=args.batch_size,
+        buffer_size=args.buffer_size,
     )
 
     # ── Phase 1: Category pre-training (if transfer learning enabled) ────
@@ -598,6 +620,9 @@ def main():
             inventory_mult=args.inventory_mult,
             epsilon_decay=args.epsilon_decay,
             hidden_dim=args.hidden_dim,
+            replay_ratio=args.replay_ratio,
+            batch_size=args.batch_size,
+            buffer_size=args.buffer_size,
         )
 
         if args.workers > 1:

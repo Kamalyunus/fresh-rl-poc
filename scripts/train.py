@@ -37,6 +37,9 @@ def train(
     epsilon_decay: float = None,
     pretrained_path: str = None,
     hidden_dim: int = 64,
+    replay_ratio: int = 1,
+    batch_size: int = 32,
+    buffer_size: int = 10000,
 ):
     """Train a DQN agent and save results."""
 
@@ -75,6 +78,9 @@ def train(
     print(f"  Base price:        ${env.base_price:.2f}")
     print(f"  State dim:         {state_dim}")
     print(f"  Hidden dim:        {hidden_dim}")
+    print(f"  Replay ratio:      {replay_ratio}")
+    print(f"  Batch size:        {batch_size}")
+    print(f"  Buffer size:       {buffer_size}")
     print(f"  Actions:           {n_actions} ({list(env.DISCOUNT_LEVELS)})")
     print(f"  Episodes:          {n_episodes}")
     print(f"  Reward shaping:    {reward_shaping}" +
@@ -101,8 +107,8 @@ def train(
         epsilon_start=1.0,
         epsilon_end=0.05,
         epsilon_decay=epsilon_decay,
-        buffer_size=10000,
-        batch_size=32,
+        buffer_size=buffer_size,
+        batch_size=batch_size,
         reward_shaping=reward_shaping,
         waste_cost_scale=waste_cost_scale,
         seed=seed,
@@ -206,8 +212,9 @@ def train(
             next_action_mask = env.action_masks() if not done else np.ones(n_actions, dtype=bool)
             agent.store_transition(obs, action, reward, next_obs, done, next_action_mask)
 
-            # Train
-            loss = agent.train_step_fn()
+            # Train (replay_ratio gradient steps per env step)
+            for _ in range(replay_ratio):
+                agent.train_step_fn()
 
             obs = next_obs
             total_reward += reward
@@ -262,6 +269,9 @@ def train(
         "prefill_episodes": prefill_episodes if prefill else 0,
         "warmup_steps": warmup_steps,
         "epsilon_decay": epsilon_decay,
+        "replay_ratio": replay_ratio,
+        "batch_size": batch_size,
+        "buffer_size": buffer_size,
         "seed": seed,
         "episode_rewards": episode_rewards,
         "episode_revenues": episode_revenues,
