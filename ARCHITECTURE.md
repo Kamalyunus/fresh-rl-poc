@@ -34,7 +34,7 @@ Detailed technical documentation of the reinforcement learning system for perish
 ```
 +----------------------------------------------------------------------+
 |                          Portfolio Runner                              |
-|  (scripts/run_portfolio.py — parallel training across 110 SKUs)       |
+|  (scripts/run_portfolio.py — parallel training across 150 SKUs)       |
 +------+-------+-------+-------+-------+-------+-------+-------+------+
        |       |       |       |       |       |       |       |
        v       v       v       v       v       v       v       v
@@ -737,9 +737,9 @@ class NStepAccumulator:
 
 ### The Problem: Asymmetric Exploration Under Progressive Constraints
 
-Standard epsilon-greedy exploration chooses uniformly among valid actions. Combined with the progressive discount constraint, this creates a systematic exploration bias: at discount index 0 with 11 valid actions, the probability of holding (choosing action 0) is only 1/11 = 9%, while the probability of going deeper is 91%. Over 24 steps of exploration in a 48h product episode, the agent is pushed to the maximum discount on virtually every training episode and **never learns that holding at low discounts is optimal** for products where demand exceeds inventory at any price.
+Standard epsilon-greedy exploration chooses uniformly among valid actions. Combined with the progressive discount constraint, this creates a systematic exploration bias: at discount index 0 with 11 valid actions, the probability of holding (choosing action 0) is only 1/11 = 9%, while the probability of going deeper is 91%. Over 12 steps of exploration in a 24h episode (2h steps), the agent is frequently pushed toward the maximum discount during training and **never learns that holding at low discounts is optimal** for products where demand exceeds inventory at moderate discounts.
 
-This explains v1.0's systematic failure on 48h products (7% beats-baseline, 2/30) despite 65% success on 12h products: shorter episodes have fewer steps where exploration pushes discounts deeper, but 48h products (24 steps in 2h mode) suffer catastrophically from the cumulative bias.
+This cumulative bias is more severe with longer episodes — each additional exploration step compounds the probability of going deeper, making it progressively harder for the agent to discover conservative hold strategies.
 
 ### Solution: Hold-Action Exploration Bias (`hold_action_prob`)
 
@@ -1205,7 +1205,7 @@ Phase 2: Fine-tune per SKU
 
 ### Purpose
 
-Validates that the RL approach generalizes across 110 products with diverse economics. Trains both plain and shaped DQN for each SKU, evaluates against all baselines, and produces aggregate analysis.
+Validates that the RL approach generalizes across 150 products with diverse economics. Trains both plain and shaped DQN for each SKU, evaluates against all baselines, and produces aggregate analysis.
 
 ### Architecture
 
@@ -1260,18 +1260,18 @@ Example: `--demand-mult 0.5 --inventory-mult 2.0` halves demand and doubles inve
 
 ### Generation System
 
-110 products across 7 categories + 5 legacy products:
+150 products across 7 categories (21-22 SKUs each, all 24h windows):
 
 ```python
 CategorySpec:
   name:           str       # e.g., "seafood"
-  sku_names:      List[str] # 15 product names
+  sku_names:      List[str] # 21-22 product names per category
   price_range:    (min, max)
   cost_frac_range:(min, max)
   demand_range:   (min, max)
   inventory_range:(min, max)
   elasticity_range:(min, max)
-  window_hours:   List[int] # e.g., [12, 24]
+  window_hours:   List[int] # [24] for all categories
 ```
 
 Each SKU's parameters are generated with a seeded RNG for full reproducibility:
@@ -1292,20 +1292,20 @@ def generate_sku_profile(category, sku_name, sku_index, rng):
 
 ### Category Characteristics
 
-| Category | Price | Window | Elasticity | Economics |
-|----------|-------|--------|------------|-----------|
-| **Meats** | $5-15 | 24h | 2.5-3.5 | Moderate price, moderate sensitivity |
-| **Seafood** | $7-20 | 12-24h | 2.0-3.0 | High price, short window, least elastic |
-| **Vegetables** | $1.50-5 | 24-48h | 3.0-4.5 | Cheap, long window, highly elastic |
-| **Fruits** | $2-7 | 24-48h | 3.0-4.0 | Moderate price, long window |
-| **Dairy** | $1.50-6 | 48h | 2.5-3.5 | Cheap, longest window |
-| **Bakery** | $2.50-7 | 24h | 3.5-4.5 | Moderate, day-fresh, most elastic |
-| **Deli prepared** | $5-14 | 12-24h | 2.5-3.5 | High price, short window |
+| Category | SKUs | Price | Window | Elasticity | Economics |
+|----------|------|-------|--------|------------|-----------|
+| **Meats** | 22 | $5-15 | 24h | 2.5-3.5 | Moderate price, moderate sensitivity |
+| **Seafood** | 22 | $7-20 | 24h | 2.0-3.0 | High price, least elastic |
+| **Vegetables** | 21 | $1.50-5 | 24h | 3.0-4.5 | Cheap, highly elastic |
+| **Fruits** | 21 | $2-7 | 24h | 3.0-4.0 | Moderate price, elastic |
+| **Dairy** | 21 | $1.50-6 | 24h | 2.5-3.5 | Cheap, moderate sensitivity |
+| **Bakery** | 21 | $2.50-7 | 24h | 3.5-4.5 | Moderate, day-fresh, most elastic |
+| **Deli prepared** | 22 | $5-14 | 24h | 2.5-3.5 | High price, moderate sensitivity |
 
 ### Catalog API
 
 ```python
-generate_catalog(seed=42) -> Dict[str, dict]  # cached, 110 entries
+generate_catalog(seed=42) -> Dict[str, dict]  # cached, 150 entries
 get_product_names(category=None) -> List[str]  # filter by category
 get_profile(product_name) -> dict              # single lookup
 get_categories() -> List[str]                  # category names

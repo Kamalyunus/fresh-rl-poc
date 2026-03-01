@@ -1,10 +1,10 @@
 # Fresh RL POC — Markdown Channel Intraday Progressive Discounting
 
-A proof-of-concept demonstrating how Reinforcement Learning (DQN) can optimize progressive markdown pricing for perishable products on an ecommerce markdown channel, outperforming rule-based approaches on **revenue**, **waste reduction**, and **clearance rate** across 110 product SKUs.
+A proof-of-concept demonstrating how Reinforcement Learning (DQN) can optimize progressive markdown pricing for perishable products on an ecommerce markdown channel, outperforming rule-based approaches on **revenue**, **waste reduction**, and **clearance rate** across 150 product SKUs.
 
 ## Problem
 
-Perishable products (produce, dairy, bakery, meat, prepared foods) that are 1-2 days from expiry are moved to a markdown landing page. The retailer must decide how deeply to discount throughout the day at configurable intervals (2h or 4h). Discounts can only go deeper (never revert) — this is the **progressive constraint**. Pricing too conservatively risks waste at deadline; pricing too aggressively sacrifices margin.
+Perishable products (produce, dairy, bakery, meat, prepared foods) that are 1-2 days from expiry are moved to a markdown landing page. The retailer must decide how deeply to discount throughout the day at 2-hour intervals across a 24-hour markdown window. Discounts can only go deeper (never revert) — this is the **progressive constraint**. Pricing too conservatively risks waste at deadline; pricing too aggressively sacrifices margin.
 
 ## Approach
 
@@ -15,7 +15,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 | Component | Design |
 |-----------|--------|
 | **State** | `[hours_remaining, inventory_remaining, current_discount_idx, tod_sin, tod_cos, dow_sin, dow_cos, recent_velocity, sell_through_rate, projected_clearance]` (10-dim, normalized to [0,1]) |
-| **Action** | 4h mode: 6 levels {20%..70%}, 2h mode: 11 levels {20%..70% by 5%} — with progressive constraint |
+| **Action** | 11 discrete levels {20%..70% by 5%} — with progressive constraint (discounts can only go deeper) |
 | **Reward** | Revenue - waste penalty - holding cost + clearance bonus |
 | **Transition** | Stochastic demand (Poisson) with price elasticity, intraday pattern, day-of-week effect |
 
@@ -27,7 +27,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Double DQN** with soft target updates (tau=0.005) — PyTorch-based
 - **Prioritized Experience Replay** (SumTree-based) for sample-efficient learning
 - **Historical data pre-filling** from baseline policies to bootstrap the replay buffer
-- **N-step returns** for faster credit assignment in short episodes (12-24 steps)
+- **N-step returns** (n=5) for faster credit assignment in short 12-step episodes
 - **Hold-action exploration bias** to correct asymmetric exploration under progressive constraints
 - **Projected clearance feature** enabling the agent to reason about whether holding current discount can clear inventory
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
@@ -45,7 +45,7 @@ fresh-rl-poc/
 │   ├── environment.py          # MarkdownChannelEnv + MarkdownProductEnv
 │   ├── dqn_agent.py            # Double DQN with action masking (PyTorch)
 │   ├── baselines.py            # 7 rule-based markdown policies
-│   ├── product_catalog.py      # 110 SKUs across 7 categories
+│   ├── product_catalog.py      # 150 SKUs across 7 categories
 │   ├── prioritized_replay.py   # PER with SumTree
 │   ├── sumtree.py              # SumTree data structure for PER
 │   └── historical_data.py      # Baseline replay buffer pre-filling
@@ -67,32 +67,31 @@ fresh-rl-poc/
 # Install dependencies
 pip install -r requirements.txt
 
-# List all 110 available products
+# List all 150 available products
 python scripts/train.py --list-products
 
 # Train a single product with all features
-python scripts/train.py --product salmon_fillet --episodes 1500 --step-hours 2 \
-    --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2
+python scripts/train.py --product salmon_fillet --episodes 3000 --step-hours 2 \
+    --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
 
 # Generate visualizations for a trained product
 python scripts/visualize.py --product salmon_fillet --step-hours 2 --per
 
-# Run portfolio across all 110 SKUs
-python scripts/run_portfolio.py --episodes 1500 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 4
-
-# Run portfolio under harder conditions (scarce demand, excess inventory)
-python scripts/run_portfolio.py --episodes 1500 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 4 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999
+# Run full portfolio across all 150 SKUs (hard mode — best configuration)
+python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
 
 # Run a single product via portfolio runner
-python scripts/run_portfolio.py --products salmon_fillet --episodes 1500
+python scripts/run_portfolio.py --products salmon_fillet --episodes 3000
 
 # Run portfolio with transfer learning (category pre-training + per-SKU fine-tuning)
 python scripts/run_portfolio.py --episodes 500 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 4 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
     --transfer-learning --pretrain-episodes 1500
 ```
 
@@ -154,8 +153,9 @@ The `shaping_ratio=0.2` normalizes the shaping signal to 20% of expected revenue
 - **Double DQN**: Uses online network to select actions, target network to evaluate — reduces overestimation
 - **Soft target updates**: `tau=0.005` for smooth target tracking instead of hard periodic copies
 - **Prioritized Experience Replay**: SumTree-based, prioritizes high-TD-error transitions
-- **Historical pre-fill**: Seeds replay buffer with baseline policy rollouts before training begins
+- **Historical pre-fill**: Seeds replay buffer with conservative baseline policy rollouts before training begins
 - **N-step returns**: Propagates rewards across multiple steps (n=5) for faster convergence in short episodes
+- **Hold-action exploration bias**: Corrects asymmetric epsilon-greedy under progressive constraints (hold_action_prob=0.5)
 - **Warmup gradient steps**: Runs N gradient steps on buffered data before online training
 
 ## Baselines
@@ -171,29 +171,28 @@ The `shaping_ratio=0.2` normalizes the shaping signal to 20% of expected revenue
 
 ## Results
 
-### Portfolio Validation (110 SKUs, hard mode, 9-dim state)
+### Portfolio Validation (v1.2 — 150 SKUs, hard mode, 10-dim state)
 
-Best configuration: 2h steps, 1500 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, 9-dim cyclical state
+Best configuration: 2h steps, 3000 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, n_step=5, hold_action_prob=0.5, 10-dim state with projected clearance
 
 | Metric | Value |
 |--------|-------|
-| Shaping wins | 53/110 (48%) |
-| Beats best baseline | 22/110 (20%) |
+| Beats best baseline | **122/150 (81%)** |
+| Median reward gap | +3.2 |
 
 **Category breakdown**:
 
-| Category | SKUs | Win% | Avg Rev Delta | Avg Waste Delta |
-|----------|------|------|---------------|-----------------|
-| meats | 15 | **73%** | +0.0% | +1.4pp |
-| vegetables | 15 | 60% | +0.2% | +0.0pp |
-| seafood | 15 | 53% | -2.2% | +2.0pp |
-| bakery | 15 | 47% | -0.5% | +0.0pp |
-| deli_prepared | 15 | 47% | -1.6% | +0.1pp |
-| fruits | 15 | 47% | -0.2% | +0.0pp |
-| dairy | 15 | 20% | -1.1% | +0.0pp |
-| legacy | 5 | 20% | -1.1% | +0.3pp |
+| Category | SKUs | Win% | Notes |
+|----------|------|------|-------|
+| bakery | 21 | **90%** | Most elastic category, DQN exploits timing well |
+| dairy | 21 | **86%** | Biggest improvement from v1.0 (was 20%) |
+| vegetables | 21 | **86%** | High elasticity + high demand = strong learner |
+| meats | 22 | **82%** | Consistent performer across iterations |
+| fruits | 21 | **81%** | Moderate price, responds well to exploration fix |
+| deli_prepared | 22 | **73%** | Higher prices, less elastic, still strong |
+| seafood | 22 | **68%** | Least elastic category, hardest for DQN |
 
-See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history and learnings.
+See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (13 iterations) and learnings.
 
 ## References
 
