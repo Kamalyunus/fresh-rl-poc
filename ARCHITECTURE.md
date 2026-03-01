@@ -137,9 +137,9 @@ The markdown pricing problem is modeled as a finite-horizon Markov Decision Proc
 | 6 | `dow_cos` | `(cos(2π·dow/7) + 1) / 2` | Cyclical day-of-week (cos component) |
 | 7 | `recent_velocity` | `/ (initial_inventory * 0.5)` | Sales momentum — rolling mean of last 3 steps |
 | 8 | `sell_through_rate` | `(total_sold/step_count) / (initial_inv/episode_len)` | Actual vs ideal sell-through pace (1.0 = on track) |
-| 9 | `projected_clearance` | `expected_demand_at_current_discount / inventory_remaining` | Whether current discount can clear remaining inventory without going deeper |
+| 9 | `projected_clearance` | `(recent_velocity * remaining_steps) / inventory_remaining` | Whether current sales pace can clear remaining inventory before deadline |
 
-**Cyclical encoding** uses sin/cos pairs so the network learns that 11pm neighbors midnight and Sunday neighbors Monday — linear floats put these maximally apart. **Sell-through rate** gives the agent a direct "am I ahead or behind pace?" signal without requiring the network to learn the division between inventory and time features. **Projected clearance** computes expected remaining demand at the current discount over all future steps (using the demand model's price effect, intraday pattern, and day-of-week pattern), divided by remaining inventory — a value near 1.0 means the current discount is sufficient to clear stock, encouraging the agent to hold rather than go deeper.
+**Cyclical encoding** uses sin/cos pairs so the network learns that 11pm neighbors midnight and Sunday neighbors Monday — linear floats put these maximally apart. **Sell-through rate** gives the agent a direct "am I ahead or behind pace?" signal without requiring the network to learn the division between inventory and time features. **Projected clearance** extrapolates from the observed recent sales velocity (rolling mean of last 3 steps) to estimate whether the current pace will clear remaining inventory before the deadline — a value near 1.0 means the agent can hold the current discount, while low values signal urgency to go deeper. Uses only observable data (past sales, time, inventory) with no access to demand model internals.
 
 All features are clipped to [0, 1] after normalization. This keeps the neural network's input distribution stable across products with vastly different absolute scales.
 
@@ -764,7 +764,7 @@ The exploration bias correction works alongside two other changes:
 
 1. **Conservative prefill mix**: The default baseline mix in `historical_data.py` weights conservative policies more heavily (backloaded_progressive 35% + fixed_20 20% = 55% conservative demonstrations), ensuring the replay buffer starts with ample "hold low" trajectories.
 
-2. **Projected clearance feature** (state dim 9 → 10): The `_projected_clearance()` method computes expected remaining demand at the current discount over all future steps divided by remaining inventory. This gives the agent direct information about whether holding is safe — a value near 1.0 means current pricing can clear stock without going deeper.
+2. **Projected clearance feature** (state dim 9 → 10): The `_projected_clearance()` method extrapolates from observed recent sales velocity to estimate whether remaining inventory will clear before the deadline. Uses only observable data (past sales, time, inventory) — no access to demand model internals.
 
 ---
 

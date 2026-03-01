@@ -593,9 +593,9 @@ The replay ratio / batch size / buffer size parameters remain available for futu
 - Ensures replay buffer starts with ample "hold low" trajectories during warmup
 
 ### 3. Projected clearance state feature (10th dimension)
-- `_projected_clearance()` computes expected remaining demand at current discount over all future steps, divided by remaining inventory
-- Uses the demand model's price effect, intraday pattern, and day-of-week pattern
-- Value near 1.0 means current discount can clear stock without going deeper
+- `_projected_clearance()` extrapolates from observed recent sales velocity (last 3 steps) to estimate whether remaining inventory will clear before the deadline
+- Uses only observable data: `(recent_velocity * remaining_steps) / inventory_remaining`
+- Value near 1.0 means current pace can clear stock without going deeper
 - Observation space: 9-dim → 10-dim
 
 **Setup (v1.1)**:

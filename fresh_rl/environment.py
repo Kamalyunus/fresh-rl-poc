@@ -111,22 +111,13 @@ class MarkdownChannelEnv(gym.Env):
             self.np_random = np.random.default_rng(seed)
 
     def _projected_clearance(self):
-        """Ratio of expected remaining demand to remaining inventory at current discount."""
+        """Ratio of projected remaining sales to remaining inventory based on observed velocity."""
         if self.inventory_remaining <= 0 or self.step_count >= self.episode_length:
             return 1.0
-        current_price = self.base_price * (1 - self.DISCOUNT_LEVELS[self.current_discount_idx])
-        price_effect = np.exp(-self.price_elasticity * (current_price / self.base_price - 1.0))
-        total_expected = 0.0
+        velocity = np.mean(self.recent_sales[-3:]) if self.recent_sales else 0.0
         remaining_steps = self.episode_length - self.step_count
-        for i in range(1, remaining_steps + 1):
-            future_tod = (self.time_of_day + i) % self.n_time_blocks
-            future_dow = (self.day_of_week + (self.time_of_day + i) // self.n_time_blocks) % 7
-            step_demand = (self.base_markdown_demand * price_effect
-                           * self.INTRADAY_PATTERN[future_tod]
-                           * self.DOW_PATTERN[future_dow]
-                           * self.step_hours / 4.0)
-            total_expected += step_demand
-        return min(total_expected / max(self.inventory_remaining, 1), 1.0)
+        projected_sales = velocity * remaining_steps
+        return min(projected_sales / max(self.inventory_remaining, 1), 1.0)
 
     def _get_obs(self):
         velocity = np.mean(self.recent_sales[-3:]) if self.recent_sales else 0.0
