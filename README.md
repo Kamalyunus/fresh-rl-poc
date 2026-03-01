@@ -14,7 +14,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 
 | Component | Design |
 |-----------|--------|
-| **State** | `[hours_remaining, inventory_remaining, current_discount_idx, tod_sin, tod_cos, dow_sin, dow_cos, recent_velocity, sell_through_rate]` (9-dim, normalized to [0,1]) |
+| **State** | `[hours_remaining, inventory_remaining, current_discount_idx, tod_sin, tod_cos, dow_sin, dow_cos, recent_velocity, sell_through_rate, projected_clearance]` (10-dim, normalized to [0,1]) |
 | **Action** | 4h mode: 6 levels {20%..70%}, 2h mode: 11 levels {20%..70% by 5%} — with progressive constraint |
 | **Reward** | Revenue - waste penalty - holding cost + clearance bonus |
 | **Transition** | Stochastic demand (Poisson) with price elasticity, intraday pattern, day-of-week effect |
@@ -28,6 +28,8 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Prioritized Experience Replay** (SumTree-based) for sample-efficient learning
 - **Historical data pre-filling** from baseline policies to bootstrap the replay buffer
 - **N-step returns** for faster credit assignment in short episodes (12-24 steps)
+- **Hold-action exploration bias** to correct asymmetric exploration under progressive constraints
+- **Projected clearance feature** enabling the agent to reason about whether holding current discount can clear inventory
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
 - **7 baseline policies** for rigorous comparison
 - **Transfer learning**: category pre-training pools experience across SKUs, per-SKU fine-tuning adapts to individual demand profiles (2.5x compute savings)

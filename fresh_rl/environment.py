@@ -8,7 +8,8 @@ Models a perishable product on an ecommerce markdown landing page:
 
 State: [hours_remaining, inventory_remaining, current_discount_idx,
         tod_sin, tod_cos, dow_sin, dow_cos,
-        recent_velocity, sell_through_rate]  (9-dim, all normalized to [0,1])
+        recent_velocity, sell_through_rate,
+        projected_clearance]  (10-dim, all normalized to [0,1])
 Action: discrete discount levels (6 levels for 4h, 11 levels for 2h)
 Reward: revenue - waste_penalty - holding_cost + clearance_bonus
 """
@@ -84,10 +85,10 @@ class MarkdownChannelEnv(gym.Env):
         # Action space: discrete discount levels (6 for 4h, 11 for 2h)
         self.action_space = spaces.Discrete(len(self.DISCOUNT_LEVELS))
 
-        # Observation space: 9-dim, all normalized to [0, 1]
+        # Observation space: 10-dim, all normalized to [0, 1]
         self.observation_space = spaces.Box(
-            low=np.zeros(9, dtype=np.float32),
-            high=np.ones(9, dtype=np.float32),
+            low=np.zeros(10, dtype=np.float32),
+            high=np.ones(10, dtype=np.float32),
             dtype=np.float32,
         )
 
@@ -108,6 +109,24 @@ class MarkdownChannelEnv(gym.Env):
 
         if seed is not None:
             self.np_random = np.random.default_rng(seed)
+
+    def _projected_clearance(self):
+        """Ratio of expected remaining demand to remaining inventory at current discount."""
+        if self.inventory_remaining <= 0 or self.step_count >= self.episode_length:
+            return 1.0
+        current_price = self.base_price * (1 - self.DISCOUNT_LEVELS[self.current_discount_idx])
+        price_effect = np.exp(-self.price_elasticity * (current_price / self.base_price - 1.0))
+        total_expected = 0.0
+        remaining_steps = self.episode_length - self.step_count
+        for i in range(1, remaining_steps + 1):
+            future_tod = (self.time_of_day + i) % self.n_time_blocks
+            future_dow = (self.day_of_week + (self.time_of_day + i) // self.n_time_blocks) % 7
+            step_demand = (self.base_markdown_demand * price_effect
+                           * self.INTRADAY_PATTERN[future_tod]
+                           * self.DOW_PATTERN[future_dow]
+                           * self.step_hours / 4.0)
+            total_expected += step_demand
+        return min(total_expected / max(self.inventory_remaining, 1), 1.0)
 
     def _get_obs(self):
         velocity = np.mean(self.recent_sales[-3:]) if self.recent_sales else 0.0
@@ -141,6 +160,7 @@ class MarkdownChannelEnv(gym.Env):
             dow_cos,                                                           # [6]
             min(velocity / max(max_velocity, 1), 1.0),                         # [7]
             sell_through_rate,                                                 # [8]
+            self._projected_clearance(),                                       # [9]
         ], dtype=np.float32)
 
         return np.clip(obs, 0.0, 1.0)

@@ -123,6 +123,7 @@ class DQNAgent:
         per_beta_anneal_steps: int = None,
         per_epsilon: float = 1e-5,
         n_step: int = 1,
+        hold_action_prob: float = 0.0,
     ):
         self.n_actions = n_actions
         self.gamma = gamma
@@ -133,6 +134,7 @@ class DQNAgent:
         self.batch_size = batch_size
         self.reward_shaping = reward_shaping
         self.waste_cost_scale = waste_cost_scale
+        self.hold_action_prob = hold_action_prob
         self.use_per = use_per
         self.tau = 0.005
 
@@ -200,6 +202,9 @@ class DQNAgent:
             valid_actions = np.arange(self.n_actions)
 
         if np.random.random() < self.epsilon:
+            # Biased exploration: favor holding current discount
+            if self.hold_action_prob > 0 and np.random.random() < self.hold_action_prob:
+                return int(valid_actions[0])  # hold = lowest valid action = current discount
             return int(np.random.choice(valid_actions))
         else:
             with torch.no_grad():

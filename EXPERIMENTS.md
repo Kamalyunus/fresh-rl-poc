@@ -574,6 +574,45 @@ The replay ratio / batch size / buffer size parameters remain available for futu
 
 ---
 
+## Iteration 12: Exploration Bias Fix — Hold-Action Exploration + Conservative Prefill + Projected Clearance
+
+**Goal**: Fix the systematic 48h product failure (7% beats-baseline, 2/30 in v1.0) caused by asymmetric exploration under progressive constraints. Three complementary fixes targeting different aspects of the problem.
+
+**Root cause analysis**: With uniform epsilon-greedy exploration and 11 valid actions at discount index 0, P(hold) = 9% while P(go deeper) = 91%. Over 24 steps of exploration in a 48h episode, the agent is pushed to max discount on virtually every training episode and never learns that holding at low discounts is optimal for products where demand exceeds inventory at any price. This explains the stark contrast: 65% beats-baseline on 12h products (fewer steps = less cumulative bias) vs 7% on 48h products.
+
+**Changes**:
+
+### 1. Hold-action exploration bias (`hold_action_prob`)
+- During epsilon-greedy exploration, a fraction `hold_action_prob` of random actions select the hold action (current discount = `valid_actions[0]`)
+- With `hold_action_prob=0.5`: P(hold) ≈ 55% (up from 9%), generating training trajectories where the agent holds at low discounts
+- Default 0.0 preserves existing behavior
+
+### 2. Conservative prefill mix
+- Updated `DEFAULT_BASELINE_MIX`: backloaded_progressive 25%→35%, fixed_20 10%→20%, linear_progressive 30%→15%, demand_responsive 25%→20%
+- Conservative demonstrations (backloaded + fixed_20) now 55% of prefill, up from 35%
+- Ensures replay buffer starts with ample "hold low" trajectories during warmup
+
+### 3. Projected clearance state feature (10th dimension)
+- `_projected_clearance()` computes expected remaining demand at current discount over all future steps, divided by remaining inventory
+- Uses the demand model's price effect, intraday pattern, and day-of-week pattern
+- Value near 1.0 means current discount can clear stock without going deeper
+- Observation space: 9-dim → 10-dim
+
+**Setup (v1.1)**:
+```bash
+python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --prefill-episodes 200 --warmup-steps 1000 \
+    --workers 16 --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --save-dir results/portfolio_v110_exploration_fix
+```
+
+### Results
+
+*(to be filled after experiment)*
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps

@@ -49,6 +49,7 @@ def _pretrain_category(
     batch_size=32,
     buffer_size=10000,
     n_step=1,
+    hold_action_prob=0.0,
 ):
     """Pre-train one agent on all products in a category."""
     from fresh_rl.environment import MarkdownProductEnv
@@ -71,6 +72,7 @@ def _pretrain_category(
         reward_shaping=False,  # no shaping during pre-training
         seed=seed, use_per=use_per,
         n_step=n_step,
+        hold_action_prob=hold_action_prob,
     )
 
     print(f"  [PRETRAIN] {category}: {len(products)} products, {total_episodes} episodes")
@@ -136,6 +138,7 @@ def _run_single_product(
     batch_size: int = 32,
     buffer_size: int = 10000,
     n_step: int = 1,
+    hold_action_prob: float = 0.0,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -174,6 +177,7 @@ def _run_single_product(
         batch_size=batch_size,
         buffer_size=buffer_size,
         n_step=n_step,
+        hold_action_prob=hold_action_prob,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -522,6 +526,8 @@ def main():
                         help="Replay buffer size (default: 10000)")
     parser.add_argument("--n-step", type=int, default=1,
                         help="N-step returns for DQN (default: 1, try 5 for faster credit assignment)")
+    parser.add_argument("--hold-action-prob", type=float, default=0.0,
+                        help="Probability of choosing hold (current discount) during exploration (default: 0.0)")
 
     # Transfer learning
     parser.add_argument("--transfer-learning", action="store_true",
@@ -573,6 +579,7 @@ def main():
     print(f"  Batch size:     {args.batch_size}")
     print(f"  Buffer size:    {args.buffer_size}")
     print(f"  N-step returns: {args.n_step}")
+    print(f"  Hold action:    {args.hold_action_prob}")
     if args.demand_mult != 1.0:
         print(f"  Demand mult:    {args.demand_mult}x")
     if args.inventory_mult != 1.0:
@@ -602,6 +609,7 @@ def main():
         batch_size=args.batch_size,
         buffer_size=args.buffer_size,
         n_step=args.n_step,
+        hold_action_prob=args.hold_action_prob,
     )
 
     # ── Phase 1: Category pre-training (if transfer learning enabled) ────
@@ -632,6 +640,7 @@ def main():
             batch_size=args.batch_size,
             buffer_size=args.buffer_size,
             n_step=args.n_step,
+            hold_action_prob=args.hold_action_prob,
         )
 
         if args.workers > 1:

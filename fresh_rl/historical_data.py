@@ -18,10 +18,10 @@ from fresh_rl.baselines import (
 
 # Default baseline mix simulating realistic retailer behavior
 DEFAULT_BASELINE_MIX = {
-    "linear_progressive": 0.30,
-    "backloaded_progressive": 0.25,
-    "demand_responsive": 0.25,
-    "fixed_20": 0.10,
+    "linear_progressive": 0.15,
+    "backloaded_progressive": 0.35,
+    "demand_responsive": 0.20,
+    "fixed_20": 0.20,
     "fixed_40": 0.10,
 }
 

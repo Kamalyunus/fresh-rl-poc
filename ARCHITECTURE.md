@@ -17,14 +17,15 @@ Detailed technical documentation of the reinforcement learning system for perish
 9. [Prioritized Experience Replay (PER)](#prioritized-experience-replay-per)
 10. [SumTree Data Structure](#sumtree-data-structure)
 11. [N-Step Returns](#n-step-returns)
-12. [Action Masking (Progressive Constraint)](#action-masking-progressive-constraint)
-13. [Reward Shaping](#reward-shaping)
-14. [Historical Data Pre-filling](#historical-data-pre-filling)
-15. [Demand Model](#demand-model)
-16. [Baseline Policies](#baseline-policies)
-17. [Training Pipeline](#training-pipeline)
-18. [Portfolio Runner](#portfolio-runner)
-19. [Product Catalog](#product-catalog)
+12. [Exploration Bias Correction](#exploration-bias-correction)
+13. [Action Masking (Progressive Constraint)](#action-masking-progressive-constraint)
+14. [Reward Shaping](#reward-shaping)
+15. [Historical Data Pre-filling](#historical-data-pre-filling)
+16. [Demand Model](#demand-model)
+17. [Baseline Policies](#baseline-policies)
+18. [Training Pipeline](#training-pipeline)
+19. [Portfolio Runner](#portfolio-runner)
+20. [Product Catalog](#product-catalog)
 
 ---
 
@@ -123,7 +124,7 @@ Environment                Agent                     Replay Buffer
 
 The markdown pricing problem is modeled as a finite-horizon Markov Decision Process.
 
-### State Space (9-dimensional, normalized to [0,1])
+### State Space (10-dimensional, normalized to [0,1])
 
 | Index | Feature | Formula / Normalization | Signal |
 |-------|---------|------------------------|--------|
@@ -136,8 +137,9 @@ The markdown pricing problem is modeled as a finite-horizon Markov Decision Proc
 | 6 | `dow_cos` | `(cos(2π·dow/7) + 1) / 2` | Cyclical day-of-week (cos component) |
 | 7 | `recent_velocity` | `/ (initial_inventory * 0.5)` | Sales momentum — rolling mean of last 3 steps |
 | 8 | `sell_through_rate` | `(total_sold/step_count) / (initial_inv/episode_len)` | Actual vs ideal sell-through pace (1.0 = on track) |
+| 9 | `projected_clearance` | `expected_demand_at_current_discount / inventory_remaining` | Whether current discount can clear remaining inventory without going deeper |
 
-**Cyclical encoding** uses sin/cos pairs so the network learns that 11pm neighbors midnight and Sunday neighbors Monday — linear floats put these maximally apart. **Sell-through rate** gives the agent a direct "am I ahead or behind pace?" signal without requiring the network to learn the division between inventory and time features.
+**Cyclical encoding** uses sin/cos pairs so the network learns that 11pm neighbors midnight and Sunday neighbors Monday — linear floats put these maximally apart. **Sell-through rate** gives the agent a direct "am I ahead or behind pace?" signal without requiring the network to learn the division between inventory and time features. **Projected clearance** computes expected remaining demand at the current discount over all future steps (using the demand model's price effect, intraday pattern, and day-of-week pattern), divided by remaining inventory — a value near 1.0 means the current discount is sufficient to clear stock, encouraging the agent to hold rather than go deeper.
 
 All features are clipped to [0, 1] after normalization. This keeps the neural network's input distribution stable across products with vastly different absolute scales.
 
@@ -519,10 +521,10 @@ Sampling: uniform random (each transition equally likely)
 ```
 
 Each transition includes:
-- **State** (9-dim float32): the observation before the action
+- **State** (10-dim float32): the observation before the action
 - **Action** (int): the discount level selected
 - **Reward** (float): possibly shaped reward
-- **Next state** (9-dim float32): the observation after the action
+- **Next state** (10-dim float32): the observation after the action
 - **Done** (bool): whether the episode ended
 - **Next action mask** (n_actions bool): valid actions from next state
 
@@ -728,6 +730,41 @@ class NStepAccumulator:
 - **PER**: N-step returns are stored in the PER buffer like any other transition — priorities are based on TD error against the n-step target.
 - **Historical pre-fill**: `fill_buffer()` calls `agent.store_transition()` with `done` flags at episode boundaries, so n-step accumulation works automatically.
 - **Bootstrap discount**: The training step uses `gamma^n_step` instead of `gamma` for the bootstrap term, matching the n-step return formula.
+
+---
+
+## Exploration Bias Correction
+
+### The Problem: Asymmetric Exploration Under Progressive Constraints
+
+Standard epsilon-greedy exploration chooses uniformly among valid actions. Combined with the progressive discount constraint, this creates a systematic exploration bias: at discount index 0 with 11 valid actions, the probability of holding (choosing action 0) is only 1/11 = 9%, while the probability of going deeper is 91%. Over 24 steps of exploration in a 48h product episode, the agent is pushed to the maximum discount on virtually every training episode and **never learns that holding at low discounts is optimal** for products where demand exceeds inventory at any price.
+
+This explains v1.0's systematic failure on 48h products (7% beats-baseline, 2/30) despite 65% success on 12h products: shorter episodes have fewer steps where exploration pushes discounts deeper, but 48h products (24 steps in 2h mode) suffer catastrophically from the cumulative bias.
+
+### Solution: Hold-Action Exploration Bias (`hold_action_prob`)
+
+During the epsilon-greedy exploration phase, a fraction `hold_action_prob` of random actions are replaced with the "hold" action (lowest valid action = current discount index):
+
+```python
+if random() < epsilon:
+    if hold_action_prob > 0 and random() < hold_action_prob:
+        return valid_actions[0]  # hold current discount
+    return random_choice(valid_actions)  # uniform over valid
+```
+
+With `hold_action_prob=0.5`, the exploration distribution becomes:
+- P(hold) = 0.5 + 0.5 × (1/n_valid) ≈ 55% (up from 9%)
+- P(go deeper by 1) = 0.5 × (1/n_valid) ≈ 5% each
+
+This generates training episodes where the agent holds at low discounts for many steps, learning that conservative pricing can be optimal when projected clearance is high.
+
+### Complementary Fixes
+
+The exploration bias correction works alongside two other changes:
+
+1. **Conservative prefill mix**: The default baseline mix in `historical_data.py` weights conservative policies more heavily (backloaded_progressive 35% + fixed_20 20% = 55% conservative demonstrations), ensuring the replay buffer starts with ample "hold low" trajectories.
+
+2. **Projected clearance feature** (state dim 9 → 10): The `_projected_clearance()` method computes expected remaining demand at the current discount over all future steps divided by remaining inventory. This gives the agent direct information about whether holding is safe — a value near 1.0 means current pricing can clear stock without going deeper.
 
 ---
 
@@ -1108,6 +1145,7 @@ Visualization (scripts/visualize.py):
 | `buffer_size` | 10,000 | ~1000 episodes of experience |
 | `batch_size` | 32 | Standard mini-batch size |
 | `n_step` | 1 (default), 5 (recommended) | N-step returns for faster credit assignment in short episodes |
+| `hold_action_prob` | 0.0 (default), 0.5 (recommended) | Fraction of exploration actions that hold current discount — corrects asymmetric exploration bias under progressive constraints |
 | `tau` | 0.005 | Soft target update rate |
 | `PER alpha` | 0.6 | Moderate prioritization |
 | `PER beta` | 0.4 -> 1.0 | Anneal IS correction |
