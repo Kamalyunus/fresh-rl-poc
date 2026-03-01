@@ -1,13 +1,16 @@
 """
-Portfolio runner: train and evaluate DQN across all catalog SKUs.
+Portfolio runner: train and evaluate DQN across all 150 catalog SKUs.
 
-Trains plain DQN and shaped DQN for each product, evaluates against baselines,
-then produces aggregate analysis showing shaping win rate across categories.
+Trains plain DQN and shaped DQN for each product, evaluates against 7 baselines,
+then produces aggregate analysis and comprehensive portfolio visualizations.
 
 Usage:
-    python scripts/run_portfolio.py [--category meats] [--episodes 500] [--workers 4] [--resume]
-    python scripts/run_portfolio.py --category legacy --episodes 200 --eval-episodes 50
-    python scripts/run_portfolio.py --episodes 500 --eval-episodes 100
+    python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
+        --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+        --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+        --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
+    python scripts/run_portfolio.py --category meats --episodes 3000 --workers 4
+    python scripts/run_portfolio.py --products salmon_fillet --episodes 3000
 """
 
 import sys
@@ -740,10 +743,16 @@ def main():
     elapsed = time.time() - start_time
     print(f"\n  Total time: {elapsed/60:.1f} minutes")
 
-    # Final save + report + plot
+    # Final save + report + plots
     save_results(all_results, args.save_dir)
     print_aggregate_report(all_results)
     plot_portfolio_summary(all_results, args.save_dir)
+
+    # Generate comprehensive portfolio visualizations
+    portfolio_json = os.path.join(args.save_dir, "portfolio_results.json")
+    if os.path.exists(portfolio_json):
+        from scripts.visualize import generate_portfolio_plots
+        generate_portfolio_plots(portfolio_json, save_dir=args.save_dir)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
 """
-Visualization script: generate plots from training and evaluation results.
+Visualization suite for Fresh RL: single-product and portfolio-level plots.
 
 Usage:
-    python scripts/visualize.py [--product salad_mix] [--step-hours 4] [--save-dir results]
+    # Single product plots (training curves, policy heatmap, episode walkthrough, etc.)
+    python scripts/visualize.py --product salmon_fillet --step-hours 2 --per
+
+    # Comprehensive portfolio visualization (8 plots from portfolio_results.json)
+    python scripts/visualize.py --portfolio results/portfolio_v120/portfolio_results.json
 """
 
 import sys
@@ -616,6 +620,460 @@ def plot_action_progression(env, agent, save_dir, suffix, n_episodes=50):
     print(f"  Saved: {path}")
 
 
+# ── Portfolio visualization functions ────────────────────────────────────
+
+def _load_portfolio_results(path):
+    """Load and validate portfolio results from JSON."""
+    with open(path) as f:
+        data = json.load(f)
+    results = data.get("results", data if isinstance(data, list) else [])
+    return [r for r in results if r.get("status") == "ok"]
+
+
+def _get_category_colors(categories):
+    """Get consistent category color mapping."""
+    cmap = plt.colormaps.get_cmap("tab10").resampled(max(len(categories), 1))
+    return {cat: cmap(i) for i, cat in enumerate(sorted(categories))}
+
+
+def plot_dqn_vs_baseline_scatter(ok_results, save_dir):
+    """Scatter: shaped DQN reward vs best baseline reward per SKU, colored by category."""
+    categories = sorted(set(r["category"] for r in ok_results))
+    cat_colors = _get_category_colors(categories)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    for r in ok_results:
+        color = cat_colors[r["category"]]
+        ax.scatter(
+            r["best_baseline_reward"], r["shaped_reward"],
+            c=[color], s=50, alpha=0.7,
+            edgecolors="white", linewidth=0.5,
+        )
+
+    # Diagonal reference line
+    all_vals = ([r["best_baseline_reward"] for r in ok_results]
+                + [r["shaped_reward"] for r in ok_results])
+    lo, hi = min(all_vals), max(all_vals)
+    margin = (hi - lo) * 0.05
+    ax.plot([lo - margin, hi + margin], [lo - margin, hi + margin],
+            "k--", alpha=0.3, linewidth=1)
+
+    # Shade win/loss regions
+    ax.fill_between([lo - margin, hi + margin], [lo - margin, hi + margin],
+                    hi + margin, alpha=0.03, color="green")
+    ax.fill_between([lo - margin, hi + margin], lo - margin,
+                    [lo - margin, hi + margin], alpha=0.03, color="red")
+
+    wins = sum(1 for r in ok_results if r["beats_baseline"])
+    total = len(ok_results)
+    ax.text(0.05, 0.95, f"DQN wins: {wins}/{total} ({wins/total*100:.0f}%)",
+            transform=ax.transAxes, fontsize=12, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8))
+
+    for cat in categories:
+        ax.scatter([], [], c=[cat_colors[cat]], label=cat, s=50)
+    ax.legend(fontsize=9, loc="lower right")
+
+    ax.set_xlabel("Best Baseline Reward", fontsize=12)
+    ax.set_ylabel("DQN Shaped Reward", fontsize=12)
+    ax.set_title("DQN vs Best Baseline — Per-SKU Reward",
+                 fontsize=14, fontweight="bold")
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal")
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_dqn_vs_baseline.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def plot_category_win_rates(ok_results, save_dir):
+    """Horizontal bar chart: beats-baseline win% per category, sorted."""
+    by_cat = {}
+    for r in ok_results:
+        by_cat.setdefault(r["category"], []).append(r)
+
+    cats = sorted(by_cat.keys(),
+                  key=lambda c: sum(1 for r in by_cat[c] if r["beats_baseline"]) / len(by_cat[c]))
+    win_pcts = [sum(1 for r in by_cat[c] if r["beats_baseline"]) / len(by_cat[c]) * 100
+                for c in cats]
+    n_wins = [sum(1 for r in by_cat[c] if r["beats_baseline"]) for c in cats]
+    n_total = [len(by_cat[c]) for c in cats]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    colors = [plt.cm.RdYlGn(pct / 100) for pct in win_pcts]
+    bars = ax.barh(cats, win_pcts, color=colors, edgecolor="white",
+                   linewidth=0.5, height=0.6)
+
+    for bar, pct, nw, nt in zip(bars, win_pcts, n_wins, n_total):
+        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
+                f"{pct:.0f}% ({nw}/{nt})", va="center", fontsize=10, fontweight="bold")
+
+    overall_pct = sum(n_wins) / sum(n_total) * 100
+    ax.axvline(overall_pct, color="navy", linestyle="--", alpha=0.5, linewidth=1.5,
+               label=f"Overall: {overall_pct:.0f}%")
+
+    ax.set_xlabel("Beats Best Baseline (%)", fontsize=12)
+    ax.set_xlim(0, 110)
+    ax.set_title("DQN Win Rate by Category", fontsize=14, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, axis="x", alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_category_win_rates.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def plot_reward_gap_distribution(ok_results, save_dir):
+    """Histogram of reward gap (DQN - best baseline), green=wins, red=losses."""
+    gaps = [r["shaped_reward"] - r["best_baseline_reward"] for r in ok_results]
+    wins = [g for g in gaps if g > 0]
+    losses = [g for g in gaps if g <= 0]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    bin_edges = np.histogram_bin_edges(gaps, bins=30)
+    ax.hist(wins, bins=bin_edges, color="#27AE60", alpha=0.8, edgecolor="white",
+            label=f"DQN wins ({len(wins)})")
+    ax.hist(losses, bins=bin_edges, color="#E74C3C", alpha=0.8, edgecolor="white",
+            label=f"Baseline wins ({len(losses)})")
+
+    ax.axvline(0, color="black", linestyle="-", linewidth=1.5, alpha=0.5)
+    median_gap = np.median(gaps)
+    ax.axvline(median_gap, color="navy", linestyle="--", linewidth=1.5, alpha=0.7,
+               label=f"Median: {median_gap:+.1f}")
+
+    ax.set_xlabel("Reward Gap (DQN - Best Baseline)", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    ax.set_title("Distribution of DQN vs Best Baseline Reward Gap",
+                 fontsize=14, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_reward_gap_distribution.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def plot_per_sku_reward_gaps(ok_results, save_dir):
+    """Dot plot: reward gap per SKU, grouped by category, sorted within each."""
+    by_cat = {}
+    for r in ok_results:
+        by_cat.setdefault(r["category"], []).append(r)
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    x_pos = 0
+    tick_positions = []
+    tick_labels = []
+
+    for cat in sorted(by_cat.keys()):
+        results_cat = sorted(by_cat[cat],
+                             key=lambda r: r["shaped_reward"] - r["best_baseline_reward"])
+        gaps = [r["shaped_reward"] - r["best_baseline_reward"] for r in results_cat]
+        xs = np.arange(x_pos, x_pos + len(gaps))
+
+        colors = ["#27AE60" if g > 0 else "#E74C3C" for g in gaps]
+        ax.scatter(xs, gaps, c=colors, s=30, alpha=0.7,
+                   edgecolors="white", linewidth=0.3, zorder=3)
+
+        tick_positions.append(x_pos + len(gaps) / 2)
+        tick_labels.append(cat)
+
+        if x_pos > 0:
+            ax.axvline(x_pos - 1, color="gray", linestyle=":", alpha=0.3)
+
+        x_pos += len(gaps) + 2
+
+    ax.axhline(0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels, fontsize=10)
+    ax.set_ylabel("Reward Gap (DQN - Best Baseline)", fontsize=12)
+    ax.set_title("Per-SKU Reward Gap by Category", fontsize=14, fontweight="bold")
+    ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_per_sku_gaps.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def plot_baseline_difficulty(ok_results, save_dir):
+    """Which baselines are hardest to beat: frequency as best + DQN win rate against each."""
+    from collections import Counter
+
+    baseline_counts = Counter(r["best_baseline"] for r in ok_results)
+    baselines = sorted(baseline_counts.keys(),
+                       key=lambda b: baseline_counts[b], reverse=True)
+
+    counts = [baseline_counts[b] for b in baselines]
+    win_rates = []
+    for b in baselines:
+        skus = [r for r in ok_results if r["best_baseline"] == b]
+        win_rates.append(
+            sum(1 for r in skus if r["beats_baseline"]) / len(skus) * 100
+            if skus else 0
+        )
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Panel 1: frequency as the best baseline
+    colors_1 = [COLORS.get(b, "#95A5A6") for b in baselines]
+    bars = ax1.barh(baselines, counts, color=colors_1, edgecolor="white", linewidth=0.5)
+    for bar, c in zip(bars, counts):
+        ax1.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height() / 2,
+                 str(c), va="center", fontsize=10)
+    ax1.set_xlabel("# SKUs Where This Baseline Is Best", fontsize=11)
+    ax1.set_title("Most Common Best Baseline", fontsize=13, fontweight="bold")
+    ax1.grid(True, axis="x", alpha=0.3)
+
+    # Panel 2: DQN win rate against each
+    colors_2 = [plt.cm.RdYlGn(wr / 100) for wr in win_rates]
+    bars = ax2.barh(baselines, win_rates, color=colors_2, edgecolor="white", linewidth=0.5)
+    for bar, wr, b in zip(bars, win_rates, baselines):
+        ax2.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
+                 f"{wr:.0f}% (n={baseline_counts[b]})", va="center", fontsize=10)
+    ax2.set_xlabel("DQN Win Rate (%)", fontsize=11)
+    ax2.set_xlim(0, 110)
+    ax2.set_title("DQN Win Rate vs Each Baseline Type", fontsize=13, fontweight="bold")
+    ax2.grid(True, axis="x", alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_baseline_difficulty.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def plot_revenue_waste_by_category(ok_results, save_dir):
+    """Grouped bar: DQN vs best baseline revenue and waste per category."""
+    by_cat = {}
+    for r in ok_results:
+        by_cat.setdefault(r["category"], []).append(r)
+
+    cats = sorted(by_cat.keys())
+    x_pos = np.arange(len(cats))
+    width = 0.35
+
+    dqn_rev = [np.mean([r["shaped_revenue"] for r in by_cat[c]]) for c in cats]
+    bl_rev = [np.mean([r["best_baseline_revenue"] for r in by_cat[c]]) for c in cats]
+    dqn_waste = [np.mean([r["shaped_waste"] for r in by_cat[c]]) * 100 for c in cats]
+    bl_waste = [np.mean([r["best_baseline_waste"] for r in by_cat[c]]) * 100 for c in cats]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    ax1.bar(x_pos - width / 2, dqn_rev, width, label="DQN Shaped",
+            color="#2E86C1", alpha=0.8)
+    ax1.bar(x_pos + width / 2, bl_rev, width, label="Best Baseline",
+            color="#E67E22", alpha=0.8)
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(cats, rotation=30, ha="right", fontsize=9)
+    ax1.set_ylabel("Mean Revenue ($)", fontsize=11)
+    ax1.set_title("Revenue: DQN vs Best Baseline", fontsize=13, fontweight="bold")
+    ax1.legend(fontsize=9)
+    ax1.grid(True, axis="y", alpha=0.3)
+
+    ax2.bar(x_pos - width / 2, dqn_waste, width, label="DQN Shaped",
+            color="#2E86C1", alpha=0.8)
+    ax2.bar(x_pos + width / 2, bl_waste, width, label="Best Baseline",
+            color="#E67E22", alpha=0.8)
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(cats, rotation=30, ha="right", fontsize=9)
+    ax2.set_ylabel("Mean Waste Rate (%)", fontsize=11)
+    ax2.set_title("Waste: DQN vs Best Baseline", fontsize=13, fontweight="bold")
+    ax2.legend(fontsize=9)
+    ax2.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_revenue_waste_comparison.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def plot_portfolio_dashboard(ok_results, save_dir):
+    """6-panel comprehensive portfolio dashboard combining all key views."""
+    from collections import Counter
+
+    categories = sorted(set(r["category"] for r in ok_results))
+    cat_colors = _get_category_colors(categories)
+    by_cat = {}
+    for r in ok_results:
+        by_cat.setdefault(r["category"], []).append(r)
+
+    fig = plt.figure(figsize=(24, 16), layout="constrained")
+    wins_total = sum(1 for r in ok_results if r["beats_baseline"])
+    fig.suptitle(
+        f"Portfolio Dashboard — {len(ok_results)} SKUs, "
+        f"{wins_total}/{len(ok_results)} beat baseline "
+        f"({wins_total/len(ok_results)*100:.0f}%)",
+        fontsize=18, fontweight="bold",
+    )
+
+    gs = fig.add_gridspec(2, 3, hspace=0.08, wspace=0.08)
+
+    # Panel 1 (top-left): DQN vs Baseline scatter
+    ax = fig.add_subplot(gs[0, 0])
+    for r in ok_results:
+        ax.scatter(r["best_baseline_reward"], r["shaped_reward"],
+                   c=[cat_colors[r["category"]]], s=25, alpha=0.7,
+                   edgecolors="white", linewidth=0.3)
+    all_vals = ([r["best_baseline_reward"] for r in ok_results]
+                + [r["shaped_reward"] for r in ok_results])
+    lo, hi = min(all_vals), max(all_vals)
+    ax.plot([lo, hi], [lo, hi], "k--", alpha=0.3)
+    ax.set_title(f"DQN vs Baseline Reward", fontweight="bold")
+    ax.set_xlabel("Best Baseline Reward")
+    ax.set_ylabel("DQN Shaped Reward")
+    for cat in categories:
+        ax.scatter([], [], c=[cat_colors[cat]], label=cat, s=25)
+    ax.legend(fontsize=7, loc="lower right")
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2 (top-mid): Category win rates
+    ax = fig.add_subplot(gs[0, 1])
+    cats_sorted = sorted(
+        by_cat.keys(),
+        key=lambda c: sum(1 for r in by_cat[c] if r["beats_baseline"]) / len(by_cat[c]),
+    )
+    win_pcts = [
+        sum(1 for r in by_cat[c] if r["beats_baseline"]) / len(by_cat[c]) * 100
+        for c in cats_sorted
+    ]
+    colors = [plt.cm.RdYlGn(pct / 100) for pct in win_pcts]
+    ax.barh(cats_sorted, win_pcts, color=colors, edgecolor="white", height=0.6)
+    for i, (pct, c) in enumerate(zip(win_pcts, cats_sorted)):
+        nw = sum(1 for r in by_cat[c] if r["beats_baseline"])
+        nt = len(by_cat[c])
+        ax.text(pct + 1, i, f"{pct:.0f}% ({nw}/{nt})", va="center", fontsize=9)
+    ax.set_xlim(0, 110)
+    ax.set_title("Win Rate by Category", fontweight="bold")
+    ax.grid(True, axis="x", alpha=0.3)
+
+    # Panel 3 (top-right): Reward gap histogram
+    ax = fig.add_subplot(gs[0, 2])
+    gaps = [r["shaped_reward"] - r["best_baseline_reward"] for r in ok_results]
+    wins_g = [g for g in gaps if g > 0]
+    losses_g = [g for g in gaps if g <= 0]
+    bin_edges = np.histogram_bin_edges(gaps, bins=25)
+    ax.hist(wins_g, bins=bin_edges, color="#27AE60", alpha=0.8, edgecolor="white",
+            label=f"Wins ({len(wins_g)})")
+    ax.hist(losses_g, bins=bin_edges, color="#E74C3C", alpha=0.8, edgecolor="white",
+            label=f"Losses ({len(losses_g)})")
+    ax.axvline(0, color="black", linewidth=1, alpha=0.5)
+    ax.axvline(np.median(gaps), color="navy", linestyle="--",
+               label=f"Median: {np.median(gaps):+.1f}")
+    ax.set_title("Reward Gap Distribution", fontweight="bold")
+    ax.set_xlabel("DQN - Baseline Reward")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 4 (bottom-left): Per-SKU dot plot
+    ax = fig.add_subplot(gs[1, 0])
+    x_pos = 0
+    ticks, tlabels = [], []
+    for cat in sorted(by_cat.keys()):
+        results_cat = sorted(
+            by_cat[cat],
+            key=lambda r: r["shaped_reward"] - r["best_baseline_reward"],
+        )
+        gaps_cat = [r["shaped_reward"] - r["best_baseline_reward"] for r in results_cat]
+        xs = np.arange(x_pos, x_pos + len(gaps_cat))
+        c = ["#27AE60" if g > 0 else "#E74C3C" for g in gaps_cat]
+        ax.scatter(xs, gaps_cat, c=c, s=20, alpha=0.7,
+                   edgecolors="white", linewidth=0.2, zorder=3)
+        ticks.append(x_pos + len(gaps_cat) / 2)
+        tlabels.append(cat)
+        x_pos += len(gaps_cat) + 2
+    ax.axhline(0, color="black", linewidth=1, alpha=0.5)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(tlabels, fontsize=8, rotation=30)
+    ax.set_title("Per-SKU Reward Gaps", fontweight="bold")
+    ax.set_ylabel("DQN - Baseline")
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Panel 5 (bottom-mid): Revenue comparison
+    ax = fig.add_subplot(gs[1, 1])
+    cats_rev = sorted(by_cat.keys())
+    x_r = np.arange(len(cats_rev))
+    w = 0.35
+    dqn_rev = [np.mean([r["shaped_revenue"] for r in by_cat[c]]) for c in cats_rev]
+    bl_rev = [np.mean([r["best_baseline_revenue"] for r in by_cat[c]]) for c in cats_rev]
+    ax.bar(x_r - w / 2, dqn_rev, w, label="DQN", color="#2E86C1", alpha=0.8)
+    ax.bar(x_r + w / 2, bl_rev, w, label="Baseline", color="#E67E22", alpha=0.8)
+    ax.set_xticks(x_r)
+    ax.set_xticklabels(cats_rev, rotation=30, ha="right", fontsize=8)
+    ax.set_title("Revenue by Category", fontweight="bold")
+    ax.set_ylabel("Mean Revenue ($)")
+    ax.legend(fontsize=8)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Panel 6 (bottom-right): Baseline difficulty
+    ax = fig.add_subplot(gs[1, 2])
+    bl_counts = Counter(r["best_baseline"] for r in ok_results)
+    bls = sorted(bl_counts.keys(), key=lambda b: bl_counts[b], reverse=True)
+    bl_wr = []
+    for b in bls:
+        skus = [r for r in ok_results if r["best_baseline"] == b]
+        bl_wr.append(sum(1 for r in skus if r["beats_baseline"]) / len(skus) * 100)
+    colors_bl = [plt.cm.RdYlGn(wr / 100) for wr in bl_wr]
+    ax.barh(bls, bl_wr, color=colors_bl, edgecolor="white", height=0.6)
+    for i, (wr, b) in enumerate(zip(bl_wr, bls)):
+        ax.text(wr + 1, i, f"{wr:.0f}% (n={bl_counts[b]})", va="center", fontsize=9)
+    ax.set_xlim(0, 110)
+    ax.set_title("DQN Win Rate vs Each Baseline", fontweight="bold")
+    ax.set_xlabel("Win Rate (%)")
+    ax.grid(True, axis="x", alpha=0.3)
+
+    path = os.path.join(save_dir, "portfolio_dashboard.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def generate_portfolio_plots(portfolio_path, save_dir=None):
+    """Generate all portfolio-level visualizations from portfolio_results.json.
+
+    Args:
+        portfolio_path: Path to portfolio_results.json
+        save_dir: Output directory (defaults to same directory as portfolio_path)
+    """
+    ok_results = _load_portfolio_results(portfolio_path)
+    if len(ok_results) < 2:
+        print("  Need at least 2 successful results for portfolio plots.")
+        return
+
+    if save_dir is None:
+        save_dir = os.path.dirname(portfolio_path)
+    os.makedirs(save_dir, exist_ok=True)
+
+    n = len(ok_results)
+    wins = sum(1 for r in ok_results if r.get("beats_baseline"))
+    cats = len(set(r["category"] for r in ok_results))
+    print(f"\n  Generating portfolio visualizations: "
+          f"{n} SKUs, {wins}/{n} wins ({wins/n*100:.0f}%), {cats} categories")
+    print(f"  {'='*60}")
+
+    plot_portfolio_dashboard(ok_results, save_dir)
+    plot_dqn_vs_baseline_scatter(ok_results, save_dir)
+    plot_category_win_rates(ok_results, save_dir)
+    plot_reward_gap_distribution(ok_results, save_dir)
+    plot_per_sku_reward_gaps(ok_results, save_dir)
+    plot_baseline_difficulty(ok_results, save_dir)
+    plot_revenue_waste_by_category(ok_results, save_dir)
+    plot_category_heatmap({"results": ok_results}, save_dir)
+
+    print(f"\n  Done! 8 portfolio plots saved to {save_dir}/")
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────────
 
 def generate_all_plots(product="salad_mix", step_hours=4, save_dir="results", use_per=False):
@@ -686,11 +1144,23 @@ def generate_all_plots(product="salad_mix", step_hours=4, save_dir="results", us
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--product", type=str, default="salad_mix")
-    parser.add_argument("--step-hours", type=int, default=4, choices=[2, 4],
-                        help="Hours per decision step (2 or 4)")
-    parser.add_argument("--save-dir", type=str, default="results")
-    parser.add_argument("--per", action="store_true", help="Look for PER result files")
+    parser = argparse.ArgumentParser(
+        description="Visualization suite for Fresh RL training and portfolio results"
+    )
+    parser.add_argument("--product", type=str, default="salmon_fillet",
+                        help="Product name for single-product plots")
+    parser.add_argument("--step-hours", type=int, default=2, choices=[2, 4],
+                        help="Hours per decision step (default: 2)")
+    parser.add_argument("--save-dir", type=str, default="results",
+                        help="Output directory for plots")
+    parser.add_argument("--per", action="store_true",
+                        help="Look for PER result files")
+    parser.add_argument("--portfolio", type=str, default=None,
+                        help="Path to portfolio_results.json for comprehensive portfolio plots")
     args = parser.parse_args()
-    generate_all_plots(product=args.product, step_hours=args.step_hours, save_dir=args.save_dir, use_per=args.per)
+
+    if args.portfolio:
+        generate_portfolio_plots(args.portfolio, save_dir=args.save_dir)
+    else:
+        generate_all_plots(product=args.product, step_hours=args.step_hours,
+                           save_dir=args.save_dir, use_per=args.per)

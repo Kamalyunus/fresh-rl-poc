@@ -1127,9 +1127,14 @@ Evaluation (scripts/evaluate.py):
   -> Greedy rollouts, per-policy metrics, comparison table
 
 Visualization (scripts/visualize.py):
-  -> Training curves, training dashboard, policy comparison bars,
-     action distributions, policy heatmap, episode walkthrough,
-     revenue-waste Pareto, discount progression, category heatmap
+  Single-product mode (--product):
+    -> Training curves, training dashboard, policy comparison bars,
+       action distributions, policy heatmap, episode walkthrough,
+       revenue-waste Pareto, discount progression
+  Portfolio mode (--portfolio):
+    -> 6-panel dashboard, DQN-vs-baseline scatter, category win rates,
+       reward gap distribution, per-SKU gap dots, baseline difficulty,
+       revenue-waste comparison, category heatmap
 ```
 
 ### Key Hyperparameters

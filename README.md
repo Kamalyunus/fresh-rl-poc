@@ -34,7 +34,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **7 baseline policies** for rigorous comparison
 - **Transfer learning**: category pre-training pools experience across SKUs, per-SKU fine-tuning adapts to individual demand profiles (2.5x compute savings)
 - **Portfolio runner** for cross-category validation with parallel workers
-- **Visualization suite**: training curves, policy comparison, policy heatmaps, episode walkthroughs, revenue-waste Pareto, training dashboard, category heatmap, and discount progression
+- **Visualization suite**: per-product plots (training curves, policy heatmaps, episode walkthroughs, revenue-waste Pareto) + comprehensive portfolio plots (dashboard, DQN-vs-baseline scatter, category win rates, reward gap distribution, per-SKU gaps, baseline difficulty, revenue-waste comparison)
 
 ## Project Structure
 
@@ -52,7 +52,7 @@ fresh-rl-poc/
 ├── scripts/
 │   ├── train.py                # Training script (single product)
 │   ├── evaluate.py             # Evaluation: DQN vs baselines
-│   ├── visualize.py            # Visualization suite (10 plot types)
+│   ├── visualize.py            # Visualization suite (per-product + portfolio)
 │   └── run_portfolio.py        # Portfolio runner (all SKUs, parallel)
 ├── results/                    # Output directory (gitignored)
 ├── requirements.txt
@@ -75,8 +75,11 @@ python scripts/train.py --product salmon_fillet --episodes 3000 --step-hours 2 \
     --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
 
-# Generate visualizations for a trained product
+# Generate single-product visualizations
 python scripts/visualize.py --product salmon_fillet --step-hours 2 --per
+
+# Generate comprehensive portfolio visualizations (8 plots)
+python scripts/visualize.py --portfolio results/portfolio/portfolio_results.json
 
 # Run full portfolio across all 150 SKUs (hard mode — best configuration)
 python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
