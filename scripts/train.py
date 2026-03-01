@@ -35,13 +35,18 @@ def train(
     double_dqn: bool = True,
     soft_target_tau: float = 0.005,
     shaping_ratio: float = 0.2,
+    env_overrides: dict = None,
+    epsilon_decay: float = None,
 ):
     """Train a DQN agent and save results."""
 
     os.makedirs(save_dir, exist_ok=True)
 
     # Create environment
-    env = MarkdownProductEnv(product_name=product, step_hours=step_hours, seed=seed)
+    env_kwargs = dict(product_name=product, step_hours=step_hours, seed=seed)
+    if env_overrides:
+        env_kwargs.update(env_overrides)
+    env = MarkdownProductEnv(**env_kwargs)
     state_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
 
@@ -55,7 +60,8 @@ def train(
     waste_cost_scale = shaping_ratio * revenue_scale
 
     # Epsilon decay: slower for 2h mode (more steps per episode)
-    epsilon_decay = 0.998 if step_hours == 2 else 0.997
+    if epsilon_decay is None:
+        epsilon_decay = 0.998 if step_hours == 2 else 0.997
 
     print(f"{'='*60}")
     print(f"  Markdown Channel RL — Training DQN Agent")
@@ -153,7 +159,10 @@ def train(
 
     def _greedy_eval():
         """Run greedy policy (epsilon=0) and return mean metrics."""
-        eval_env = MarkdownProductEnv(product_name=product, step_hours=step_hours, seed=seed + 10000)
+        eval_kwargs = dict(product_name=product, step_hours=step_hours, seed=seed + 10000)
+        if env_overrides:
+            eval_kwargs.update(env_overrides)
+        eval_env = MarkdownProductEnv(**eval_kwargs)
         old_eps = agent.epsilon
         agent.epsilon = 0.0
         eval_rewards, eval_revenues, eval_wastes, eval_clears = [], [], [], []

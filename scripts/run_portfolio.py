@@ -47,6 +47,9 @@ def _run_single_product(
     warmup_steps: int,
     double_dqn: bool,
     soft_target_tau: float,
+    demand_mult: float = 1.0,
+    inventory_mult: float = 1.0,
+    epsilon_decay: float = None,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -63,6 +66,15 @@ def _run_single_product(
     profile = catalog.get(product, {})
     category = profile.get("_category", "unknown")
 
+    # Build env overrides from multipliers
+    env_overrides = {}
+    if demand_mult != 1.0:
+        base_demand = profile.get("base_markdown_demand", 5.0)
+        env_overrides["base_markdown_demand"] = round(base_demand * demand_mult, 1)
+    if inventory_mult != 1.0:
+        base_inv = profile.get("initial_inventory", 20)
+        env_overrides["initial_inventory"] = int(base_inv * inventory_mult)
+
     per_kwargs = dict(
         use_per=use_per,
         prefill=prefill,
@@ -71,7 +83,12 @@ def _run_single_product(
         double_dqn=double_dqn,
         soft_target_tau=soft_target_tau if soft_target_tau > 0 else None,
         shaping_ratio=shaping_ratio,
+        env_overrides=env_overrides if env_overrides else None,
+        epsilon_decay=epsilon_decay,
     )
+
+    effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
+    effective_demand = round(profile.get("base_markdown_demand", 5.0) * demand_mult, 1)
 
     result = {
         "product": product,
@@ -79,7 +96,8 @@ def _run_single_product(
         "base_price": profile.get("base_price", 0),
         "cost_per_unit": profile.get("cost_per_unit", 0),
         "markdown_window_hours": profile.get("markdown_window_hours", 0),
-        "initial_inventory": profile.get("initial_inventory", 0),
+        "initial_inventory": effective_inv,
+        "base_markdown_demand": effective_demand,
         "price_elasticity": profile.get("price_elasticity", 0),
     }
 
@@ -107,7 +125,10 @@ def _run_single_product(
         )
 
         # Evaluate both + baselines
-        env = MarkdownProductEnv(product_name=product, step_hours=step_hours, seed=seed)
+        eval_env_kwargs = dict(product_name=product, step_hours=step_hours, seed=seed)
+        if env_overrides:
+            eval_env_kwargs.update(env_overrides)
+        env = MarkdownProductEnv(**eval_env_kwargs)
         state_dim = env.observation_space.shape[0]
         n_actions = env.action_space.n
 
@@ -395,6 +416,14 @@ def main():
     parser.add_argument("--no-double-dqn", action="store_true")
     parser.add_argument("--soft-target-tau", type=float, default=0.005)
 
+    # Environment difficulty multipliers
+    parser.add_argument("--demand-mult", type=float, default=1.0,
+                        help="Multiply base_markdown_demand (e.g., 0.5 = half demand)")
+    parser.add_argument("--inventory-mult", type=float, default=1.0,
+                        help="Multiply initial_inventory (e.g., 2.0 = double inventory)")
+    parser.add_argument("--epsilon-decay", type=float, default=None,
+                        help="Epsilon decay rate per episode (default: 0.998 for 2h, 0.997 for 4h)")
+
     args = parser.parse_args()
 
     # Build product list
@@ -434,6 +463,10 @@ def main():
     print(f"  Eval episodes:  {args.eval_episodes}")
     print(f"  Step hours:     {args.step_hours}h")
     print(f"  Shaping ratio:  {args.shaping_ratio}")
+    if args.demand_mult != 1.0:
+        print(f"  Demand mult:    {args.demand_mult}x")
+    if args.inventory_mult != 1.0:
+        print(f"  Inventory mult: {args.inventory_mult}x")
     print(f"  Workers:        {args.workers}")
     print(f"  Save dir:       {args.save_dir}")
     print(f"{'='*70}\n")
@@ -451,6 +484,9 @@ def main():
         warmup_steps=args.warmup_steps,
         double_dqn=not args.no_double_dqn,
         soft_target_tau=args.soft_target_tau,
+        demand_mult=args.demand_mult,
+        inventory_mult=args.inventory_mult,
+        epsilon_decay=args.epsilon_decay,
     )
 
     all_results = []
