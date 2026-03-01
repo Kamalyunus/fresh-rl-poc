@@ -32,9 +32,9 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Projected clearance feature** enabling the agent to reason about whether holding current discount can clear inventory
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
 - **7 baseline policies** for rigorous comparison
-- **Transfer learning**: category pre-training pools experience across SKUs, per-SKU fine-tuning adapts to individual demand profiles (2.5x compute savings)
+- **Transfer learning** (experimental): category pre-training + per-SKU fine-tuning available but underperforms direct training due to high intra-category SKU variance
 - **Portfolio runner** for cross-category validation with parallel workers
-- **Visualization suite**: per-product plots (training curves, policy heatmaps, episode walkthroughs, revenue-waste Pareto) + comprehensive portfolio plots (dashboard, DQN-vs-baseline scatter, category win rates, reward gap distribution, per-SKU gaps, baseline difficulty, revenue-waste comparison)
+- **Visualization suite**: per-product plots (training curves, policy heatmaps, episode walkthroughs, revenue-waste Pareto) + comprehensive portfolio plots (dashboard, DQN-vs-baseline scatter, category win rates, reward gap distribution, per-SKU gaps, baseline difficulty, revenue-waste comparison, three-way DQN/shaped/baseline comparison)
 
 ## Project Structure
 
@@ -71,31 +71,24 @@ pip install -r requirements.txt
 python scripts/train.py --list-products
 
 # Train a single product with all features
-python scripts/train.py --product salmon_fillet --episodes 3000 --step-hours 2 \
+python scripts/train.py --product salmon_fillet --episodes 5000 --step-hours 2 \
     --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
 
 # Generate single-product visualizations
 python scripts/visualize.py --product salmon_fillet --step-hours 2 --per
 
-# Generate comprehensive portfolio visualizations (8 plots)
+# Generate comprehensive portfolio visualizations (9 plots)
 python scripts/visualize.py --portfolio results/portfolio/portfolio_results.json
 
-# Run full portfolio across all 150 SKUs (hard mode — best configuration)
-python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
+# Run full portfolio across all 150 SKUs (best configuration — v1.4)
+python scripts/run_portfolio.py --episodes 5000 --eval-episodes 100 \
     --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
 
 # Run a single product via portfolio runner
-python scripts/run_portfolio.py --products salmon_fillet --episodes 3000
-
-# Run portfolio with transfer learning (category pre-training + per-SKU fine-tuning)
-python scripts/run_portfolio.py --episodes 500 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
-    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
-    --transfer-learning --pretrain-episodes 1500
+python scripts/run_portfolio.py --products salmon_fillet --episodes 5000
 ```
 
 ## Product Catalog
@@ -174,28 +167,28 @@ The `shaping_ratio=0.2` normalizes the shaping signal to 20% of expected revenue
 
 ## Results
 
-### Portfolio Validation (v1.2 — 150 SKUs, hard mode, 10-dim state)
+### Portfolio Validation (v1.4 — 150 SKUs, hard mode, 10-dim state)
 
-Best configuration: 2h steps, 3000 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, n_step=5, hold_action_prob=0.5, 10-dim state with projected clearance
+Best configuration: 2h steps, 5000 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, n_step=5, hold_action_prob=0.5, 10-dim state with projected clearance
 
 | Metric | Value |
 |--------|-------|
-| Beats best baseline | **122/150 (81%)** |
-| Median reward gap | +3.2 |
+| Beats best baseline (plain DQN) | **129/150 (86%)** |
+| Beats best baseline (shaped DQN) | **126/150 (84%)** |
 
-**Category breakdown**:
+**Category breakdown (plain DQN)**:
 
 | Category | SKUs | Win% | Notes |
 |----------|------|------|-------|
-| bakery | 21 | **90%** | Most elastic category, DQN exploits timing well |
-| dairy | 21 | **86%** | Biggest improvement from v1.0 (was 20%) |
-| vegetables | 21 | **86%** | High elasticity + high demand = strong learner |
-| meats | 22 | **82%** | Consistent performer across iterations |
-| fruits | 21 | **81%** | Moderate price, responds well to exploration fix |
-| deli_prepared | 22 | **73%** | Higher prices, less elastic, still strong |
-| seafood | 22 | **68%** | Least elastic category, hardest for DQN |
+| deli_prepared | 22 | **91%** | High price, moderate elasticity |
+| meats | 22 | **91%** | Consistent top performer |
+| vegetables | 21 | **86%** | High elasticity + high demand |
+| fruits | 21 | **86%** | Moderate price, elastic |
+| dairy | 21 | **81%** | Improved steadily across iterations |
+| seafood | 22 | **77%** | Least elastic, hardest for DQN |
+| bakery | 21 | **76%** | Biggest improvement from v1.2 (+9pp) |
 
-See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (13 iterations) and learnings.
+See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (15 iterations) and learnings.
 
 ## References
 

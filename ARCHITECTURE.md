@@ -147,8 +147,8 @@ All features are clipped to [0, 1] after normalization. This keeps the neural ne
 
 | Mode | Actions | Levels | Granularity |
 |------|---------|--------|-------------|
+| **2h** (recommended) | 11 | 20%, 25%, 30%, ..., 65%, 70% | 5pp steps |
 | **4h** | 6 | 20%, 30%, 40%, 50%, 60%, 70% | 10pp steps |
-| **2h** | 11 | 20%, 25%, 30%, ..., 65%, 70% | 5pp steps |
 
 The action is a discount index. Due to the **progressive constraint**, the agent can only select actions with index >= the current discount index. This is enforced via action masking (see [Action Masking](#action-masking-progressive-constraint)).
 
@@ -203,7 +203,7 @@ env.reset()
   +-- Sample initial inventory: base +/- N(0, noise_std=2.0), min=1
   +-- Reset discount index to 0 (20%)
   +-- Reset step counter, sales history, and metrics
-  +-- Return initial observation (6-dim normalized vector)
+  +-- Return initial observation (10-dim normalized vector)
 ```
 
 The randomized start time and day create natural variation — the agent must learn policies that work across Monday mornings (low traffic) and Saturday evenings (peak traffic).
@@ -215,7 +215,7 @@ For each time step within the markdown window:
 ```
 Step t:
   |
-  +-- Agent observes state s_t = [hours_rem, inv_rem, disc_idx, tod, dow, velocity]
+  +-- Agent observes state s_t = [hours_rem, inv_rem, disc_idx, tod_sin, tod_cos, dow_sin, dow_cos, velocity, sell_through, proj_clearance]
   |
   +-- Agent gets action mask: [False, False, True, True, True, True]
   |     (e.g., if current_discount_idx=2, actions 0,1 are masked)
@@ -275,7 +275,7 @@ Product: salmon_fillet (seafood category)
   Actions: 11 levels [20%, 25%, 30%, ..., 70%]
 
 Step 0 (hour 0-2, Saturday evening, 8pm):
-  State: [1.0, 1.0, 0.0, 0.83, 0.83, 0.0]
+  State: [1.0, 1.0, 0.0, 0.83, 0.83, 0.0, 0.78, 0.0, 0.0, 0.85]
   Mask:  [T, T, T, T, T, T, T, T, T, T, T]   (all valid, first step)
   Agent picks action 2 (30% discount -> $8.75)
   DOW=Sat(1.3) * intraday=evening(1.5) = high traffic
@@ -283,7 +283,7 @@ Step 0 (hour 0-2, Saturday evening, 8pm):
   Sells 5 units, revenue=$43.75, inventory=13
 
 Step 3 (hour 6-8, Sunday morning, 2am):
-  State: [0.75, 0.72, 0.18, 0.08, 1.0, 0.28]
+  State: [0.75, 0.72, 0.18, 0.08, 1.0, 0.28, 0.62, 0.15, 0.37, 0.72]
   Mask:  [F, F, T, T, T, T, T, T, T, T, T]   (can't go back to 20% or 25%)
   Agent picks action 4 (40% discount -> $7.50)
   DOW=Sun(1.2) * intraday=night(0.2) = very low traffic
@@ -291,7 +291,7 @@ Step 3 (hour 6-8, Sunday morning, 2am):
   Agent learned: don't waste deep discounts during low-traffic hours
 
 Step 10 (hour 20-22, Sunday evening):
-  State: [0.17, 0.28, 0.55, 0.83, 1.0, 0.22]
+  State: [0.17, 0.28, 0.55, 0.83, 1.0, 0.22, 0.78, 0.35, 0.72, 0.45]
   Mask:  [F, F, F, F, F, F, T, T, T, T, T]   (locked at 50%+)
   Only 5 units left, 2 steps remaining — urgency is high
   Agent picks action 9 (65% discount -> $4.38)
@@ -313,33 +313,34 @@ The Q-network is a 2-layer multilayer perceptron built with PyTorch `nn.Sequenti
 
 ```python
 nn.Sequential(
-    nn.Linear(6, 64),       # Layer 1
+    nn.Linear(state_dim, hidden_dim),   # Layer 1
     nn.ReLU(),
-    nn.Linear(64, 64),      # Layer 2
+    nn.Linear(hidden_dim, hidden_dim),  # Layer 2
     nn.ReLU(),
-    nn.Linear(64, n_actions) # Output
+    nn.Linear(hidden_dim, n_actions)    # Output
 )
 ```
 
+Default `hidden_dim=128` (recommended), `state_dim=10`:
+
 ```
-Input (6-dim state)
+Input (10-dim state)
     |
     v
-[Linear: 6 -> 64] -> [ReLU]     (Layer 1)
+[Linear: 10 -> 128] -> [ReLU]    (Layer 1)
     |
     v
-[Linear: 64 -> 64] -> [ReLU]    (Layer 2)
+[Linear: 128 -> 128] -> [ReLU]   (Layer 2)
     |
     v
-[Linear: 64 -> n_actions]       (Output)
+[Linear: 128 -> n_actions]       (Output)
     |
     v
-Q-values (6-dim for 4h, 11-dim for 2h)
+Q-values (11-dim for 2h mode)
 ```
 
-Total parameters:
-- 4h mode: `6*64 + 64 + 64*64 + 64 + 64*6 + 6 = 4,870`
-- 2h mode: `6*64 + 64 + 64*64 + 64 + 64*11 + 11 = 5,195`
+Total parameters (2h mode, hidden_dim=128):
+- `10*128 + 128 + 128*128 + 128 + 128*11 + 11 = 19,083`
 
 ### Kaiming Initialization
 
@@ -915,12 +916,14 @@ Pre-fill Pipeline:
 The pre-fill uses a weighted mix of policies to provide diverse behavior:
 
 ```
-linear_progressive:     30%  — steady, time-based ramp
-backloaded_progressive: 25%  — conservative early, aggressive late
-demand_responsive:      25%  — adaptive to velocity
-fixed_20:               10%  — minimal discounting
+linear_progressive:     15%  — steady, time-based ramp
+backloaded_progressive: 35%  — conservative early, aggressive late
+demand_responsive:      20%  — adaptive to velocity
+fixed_20:               20%  — minimal discounting
 fixed_40:               10%  — moderate static discount
 ```
+
+The mix is weighted toward conservative policies (backloaded 35% + fixed_20 20% = 55%) to counteract the asymmetric exploration bias that pushes toward deep discounts.
 
 This mix creates a diverse "curriculum" — the agent sees conservative strategies, aggressive strategies, and adaptive strategies. It doesn't see the random or immediate-deep baselines because those would pollute the buffer with extreme behaviors.
 
@@ -1113,7 +1116,7 @@ Pipeline:
   2. Create DQN agent (PyTorch) with configured hyperparameters
   3. [Optional] Pre-fill buffer with 200 episodes of baseline data
   4. [Optional] Run 1000 warmup gradient steps on buffered data
-  5. Online training loop (500-1500 episodes):
+  5. Online training loop (3000-5000 episodes):
        a. Reset environment
        b. Run episode (step loop with epsilon-greedy + action masking)
        c. Store transitions with reward shaping (if enabled)
@@ -1134,14 +1137,14 @@ Visualization (scripts/visualize.py):
   Portfolio mode (--portfolio):
     -> 6-panel dashboard, DQN-vs-baseline scatter, category win rates,
        reward gap distribution, per-SKU gap dots, baseline difficulty,
-       revenue-waste comparison, category heatmap
+       revenue-waste comparison, three-way DQN/shaped/baseline comparison
 ```
 
 ### Key Hyperparameters
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `hidden_dim` | 64 | Sufficient for 6-dim input; avoids overfitting |
+| `hidden_dim` | 128 (recommended) | Sufficient for 10-dim input; balances capacity and generalization |
 | `lr` | 5e-4 | Standard for DQN with Adam |
 | `gamma` | 0.97 | Balances terminal rewards with step-level signals |
 | `epsilon_start` | 1.0 | Fully random initially |
@@ -1164,12 +1167,12 @@ The epsilon decays multiplicatively per episode:
 epsilon_{t+1} = max(epsilon_end, epsilon_t * epsilon_decay)
 ```
 
-| Mode | Decay | Episodes to reach 0.1 | Final epsilon (1500 ep) |
+| Mode | Decay | Episodes to reach 0.1 | Final epsilon (5000 ep) |
 |------|-------|------------------------|------------------------|
-| 4h, 500ep | 0.997 | 766 | 0.22 |
-| 2h, 1500ep | 0.999 | 2302 | 0.22 |
+| 2h, 3000ep | 0.999 | 2302 | 0.05 |
+| 2h, 5000ep | 0.999 | 2302 | 0.05 |
 
-The 2h mode uses slower decay because the action space is nearly 2x larger (11 vs 6 actions) — the agent needs more exploration to cover the expanded policy space.
+The recommended 2h mode uses `epsilon_decay=0.999` because the action space is large (11 actions) and the progressive constraint creates asymmetric exploration — the agent needs ample exploration to discover that holding at low discounts can be optimal.
 
 ### Transfer Learning
 
@@ -1194,9 +1197,9 @@ Phase 2: Fine-tune per SKU
     4. Train for M episodes (standard pipeline: both plain and shaped)
 ```
 
-**Why it works**: Products within a category share similar demand patterns, price ranges, and elasticity profiles. Pre-training on 15 SKUs pools ~15x more experience for learning general timing/urgency patterns. Fine-tuning then adapts to each SKU's specific characteristics with less exploration needed.
+**Experimental findings**: Transfer learning was tested extensively (v1.3–v1.3.2) but **underperforms direct training** on this catalog. With 3000 fine-tuning episodes, TL achieves 71% beats-baseline vs 81% without TL — and takes longer. The root cause is high intra-category SKU variance: price ranges within a category (e.g., $5–$15 for meats) mean category-level pre-training learns an overly generic policy that interferes with SKU-specific optimization (negative transfer). Direct per-SKU training with 5000 episodes achieves the best results (86%).
 
-**Architecture compatibility**: All products with the same `step_hours` share `state_dim=9` and the same `n_actions`, so weights transfer directly without any adaptation layers.
+**Architecture compatibility**: All products share `state_dim=10` and the same `n_actions`, so weights transfer directly without any adaptation layers.
 
 **`load_pretrained()` method** (`DQNAgent`):
 - Loads only `q_network` state dict from the saved checkpoint
@@ -1219,17 +1222,17 @@ scripts/run_portfolio.py
   |
   +-- Build product list from catalog (optionally filtered by --category)
   |
-  +-- ProcessPoolExecutor (--workers 4)
+  +-- ProcessPoolExecutor (--workers 16)
   |     |
   |     +-- Worker 1: _run_single_product("salmon_fillet")
-  |     |     +-- Train plain DQN (1500 episodes)
-  |     |     +-- Train shaped DQN (1500 episodes)
+  |     |     +-- Train plain DQN (5000 episodes)
+  |     |     +-- Train shaped DQN (5000 episodes)
   |     |     +-- Evaluate both + 7 baselines (100 episodes each)
   |     |     +-- Return summary dict
   |     |
   |     +-- Worker 2: _run_single_product("ground_beef_1lb")
   |     +-- Worker 3: ...
-  |     +-- Worker 4: ...
+  |     +-- Worker N: ...
   |
   +-- Collect results incrementally (crash recovery via JSON checkpoint)
   |
@@ -1238,11 +1241,15 @@ scripts/run_portfolio.py
   |     +-- Head-to-head vs each baseline
   |     +-- Overall rankings
   |
-  +-- Generate portfolio summary plot (4-panel):
-        +-- Panel 1: Scatter — shaped vs plain reward per SKU
-        +-- Panel 2: Histogram — improvement distribution
-        +-- Panel 3: Bar — waste rate by category
-        +-- Panel 4: Box plot — shaping delta by category
+  +-- Generate portfolio visualizations (9 plots):
+        +-- 6-panel dashboard (reward/revenue/waste/clearance by category + scatter + histogram)
+        +-- DQN-vs-baseline scatter
+        +-- Category win rates (horizontal bars)
+        +-- Reward gap distribution (histogram)
+        +-- Per-SKU reward gaps (dot plot by category)
+        +-- Baseline difficulty analysis
+        +-- Revenue-waste comparison by category
+        +-- Three-way comparison (plain DQN vs shaped DQN vs best baseline)
 ```
 
 ### Demand and Inventory Multipliers
