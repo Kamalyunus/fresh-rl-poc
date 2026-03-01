@@ -674,6 +674,75 @@ The overall improvement (+6pp beats-baseline, new best 52%) was driven by 24h pr
 
 ---
 
+## Iteration 13: Catalog Cleanup — 150 SKUs, All 24h Windows
+
+**Goal**: Remove structurally unsolvable product tiers and validate DQN on a uniform catalog where it has a genuine strategic advantage.
+
+**Changes**:
+- Removed 48h markdown windows from vegetables, fruits, dairy (changed to 24h)
+- Removed 12h markdown windows from seafood, deli_prepared (changed to 24h)
+- Removed 5 legacy profiles (salad_mix, fresh_chicken, yogurt, bakery_bread, sushi)
+- Added 45 new SKUs across all 7 categories (21-22 per category)
+- Total: 150 products, all 24h, 7 categories
+
+**Rationale**: The v1.1 analysis showed 48h products have demand/inventory ratio of 1.42x (everything sells regardless of strategy), making baselines unbeatable on revenue. 12h products had a different issue — very short horizons where compounding exploration errors hurt DQN. 24h is the sweet spot where waste risk is real and DQN's adaptive strategy matters.
+
+**Setup (v1.2)**: Same as v1.1 but with the updated 150-SKU catalog:
+```bash
+python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --prefill-episodes 200 --warmup-steps 1000 \
+    --workers 16 --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --save-dir results/portfolio_v120_150skus
+```
+
+### Results
+
+| Metric | v1.1 (110 SKUs, mixed) | v1.2 (150 SKUs, all 24h) |
+|--------|------------------------|--------------------------|
+| Shaping wins | 48/110 (44%) | 71/150 (47%) |
+| Beats best baseline | 57/110 (52%) | **122/150 (81%)** |
+| Runtime (16 workers) | 40.4 min | 53.1 min |
+
+**Category breakdown**:
+
+| Category | SKUs | Beats BL | Shaping Win |
+|----------|------|----------|-------------|
+| deli_prepared | 22 | **91%** | 50% |
+| meats | 22 | **86%** | 45% |
+| vegetables | 21 | **86%** | 57% |
+| seafood | 22 | **82%** | 45% |
+| fruits | 21 | **81%** | 43% |
+| dairy | 21 | **76%** | 38% |
+| bakery | 21 | **67%** | 52% |
+
+**Reward gap (shaped DQN - best baseline)**:
+
+| Stat | Value |
+|------|-------|
+| Min | -7.7 |
+| P25 | +0.6 |
+| Median | **+3.2** |
+| P75 | +7.1 |
+| Max | +35.9 |
+
+**Remaining failures (28/150)**:
+- Backloaded Progressive wins 17/28 (61%)
+- Immediate Deep 70% wins 5/28 (18%)
+- Demand Responsive wins 4/28 (14%)
+
+### Analysis
+
+1. **Beats-baseline jumped from 52% to 81%** — the single biggest improvement in the project. Removing structurally unsolvable tiers (48h, 12h) and focusing on the 24h sweet spot where DQN has a genuine strategic advantage made the difference.
+2. **Every category above 67%**: Even the weakest category (bakery) beats baselines on 2/3 of SKUs. Deli_prepared leads at 91%.
+3. **Median reward gap of +3.2**: The DQN doesn't just barely win — it meaningfully outperforms baselines on most products.
+4. **Failures are concentrated against Backloaded Progressive**: This baseline is the hardest to beat because it mimics a reasonable human strategy (hold early, ramp late). The remaining 28 failures likely need either more training or a different approach.
+5. **Shaping win rate stable at 47%**: Reward shaping continues to be roughly neutral in aggregate — n-step returns already handle credit assignment, making shaping's urgency signal redundant for most products.
+
+**Learning**: **Problem selection matters as much as algorithm design.** The biggest improvement in the entire project (+29pp beats-baseline) came not from a new algorithm or hyperparameter, but from removing product tiers where RL has no structural advantage over simple rules. In production, this translates to: use RL for products where pricing decisions have real consequences (waste risk), and use rule-based policies for products that sell out regardless.
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps
