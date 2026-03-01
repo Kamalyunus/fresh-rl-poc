@@ -1,14 +1,14 @@
 """
-Product catalog: 7 categories × 15 SKUs = 105 generated + 5 legacy = 110 products.
+Product catalog: 7 categories × 21-22 SKUs = 150 products.
 
 Provides reproducible SKU generation with realistic economics for fresh food
-markdown channel simulation.
+markdown channel simulation. All products use 24h markdown windows.
 
 Usage:
     from fresh_rl.product_catalog import generate_catalog, get_product_names, get_profile
 
-    catalog = generate_catalog()          # 110 products, cached
-    names = get_product_names("meats")    # 15 meat SKU names
+    catalog = generate_catalog()          # 150 products, cached
+    names = get_product_names("meats")    # 22 meat SKU names
     profile = get_profile("salmon_fillet") # dict ready for MarkdownProductEnv
 """
 
@@ -46,11 +46,13 @@ CATEGORIES: Dict[str, CategorySpec] = {
             "lamb_chop", "bacon_pack", "turkey_breast", "beef_roast_chuck",
             "pork_tenderloin", "chicken_thigh_pack", "italian_sausage",
             "ground_turkey_1lb", "beef_stew_meat", "pork_ribs_rack", "chicken_wings_2lb",
+            "flank_steak", "chicken_drumsticks_4pk", "beef_short_ribs",
+            "pork_shoulder_roast", "veal_cutlet", "bison_burger_2pk", "duck_breast",
         ],
     ),
     "seafood": CategorySpec(
         name="seafood",
-        markdown_window_options=[12, 24],
+        markdown_window_options=[24],
         price_range=(7.0, 20.0),
         elasticity_range=(2.0, 3.0),
         cost_fraction_range=(0.45, 0.60),
@@ -61,6 +63,8 @@ CATEGORIES: Dict[str, CategorySpec] = {
             "lobster_tail", "tilapia_fillet", "crab_cakes_2pk", "tuna_steak",
             "cod_fillet", "mussels_2lb", "smoked_salmon_4oz", "scallops_8oz",
             "clam_chowder_qt", "shrimp_cocktail", "fish_tacos_kit",
+            "swordfish_steak", "catfish_fillet", "oysters_dozen",
+            "crawfish_2lb", "halibut_fillet", "anchovies_tin", "sardines_can",
         ],
     ),
     "vegetables": CategorySpec(
@@ -76,6 +80,8 @@ CATEGORIES: Dict[str, CategorySpec] = {
             "bell_pepper_3pk", "broccoli_crown", "cherry_tomatoes_pt", "green_beans_lb",
             "zucchini_2pk", "corn_on_cob_4pk", "kale_bunch", "brussels_sprouts_lb",
             "cauliflower_head", "snap_peas_8oz", "herb_mix_fresh",
+            "artichoke_2pk", "radishes_bunch", "celery_stalks",
+            "sweet_potato_3lb", "eggplant_each", "leek_bunch",
         ],
     ),
     "fruits": CategorySpec(
@@ -91,6 +97,8 @@ CATEGORIES: Dict[str, CategorySpec] = {
             "raspberries_6oz", "mango_sliced", "grapes_red_2lb", "pineapple_chunks",
             "peaches_4pk", "kiwi_6pk", "banana_bunch_organic", "blackberries_6oz",
             "cantaloupe_half", "mixed_berries_12oz", "pomegranate_seeds_8oz",
+            "cherries_1lb", "plums_4pk", "nectarines_4pk",
+            "papaya_half", "lychee_8oz", "figs_6pk",
         ],
     ),
     "dairy": CategorySpec(
@@ -107,6 +115,8 @@ CATEGORIES: Dict[str, CategorySpec] = {
             "sour_cream_16oz", "heavy_cream_pt", "yogurt_strawberry",
             "cheddar_block_8oz", "ricotta_15oz", "half_and_half_qt",
             "whipped_cream_8oz", "goat_cheese_4oz", "brie_wheel_8oz",
+            "yogurt_vanilla", "milk_oat_half_gal", "feta_crumbles_6oz",
+            "mascarpone_8oz", "kefir_strawberry_qt", "gruyere_wedge_6oz",
         ],
     ),
     "bakery": CategorySpec(
@@ -123,11 +133,13 @@ CATEGORIES: Dict[str, CategorySpec] = {
             "muffins_blueberry_4pk", "danish_pastry_4pk", "rye_bread_loaf",
             "brioche_buns_6pk", "scones_cranberry_4pk", "focaccia_herb",
             "challah_loaf", "tortillas_flour_10pk",
+            "pretzel_rolls_6pk", "cornbread_loaf", "pita_bread_6pk",
+            "banana_bread_loaf", "olive_bread_loaf", "pumpernickel_loaf",
         ],
     ),
     "deli_prepared": CategorySpec(
         name="deli_prepared",
-        markdown_window_options=[12, 24],
+        markdown_window_options=[24],
         price_range=(5.0, 14.0),
         elasticity_range=(2.5, 3.5),
         cost_fraction_range=(0.35, 0.50),
@@ -139,53 +151,11 @@ CATEGORIES: Dict[str, CategorySpec] = {
             "pizza_slice_pepperoni", "fried_chicken_8pc", "pasta_salad_lb",
             "hummus_roasted_garlic", "quiche_lorraine", "spring_rolls_6pk",
             "pulled_pork_lb", "meatball_sub", "greek_salad_bowl",
+            "chicken_tikka_bowl", "beef_empanadas_4pk", "cobb_salad_bowl",
+            "teriyaki_chicken_bowl", "stuffed_peppers_2pk", "caprese_salad_bowl",
+            "bbq_pulled_chicken_lb",
         ],
     ),
-}
-
-# ── Legacy profiles (verbatim from environment.py) ────────────────────────
-
-LEGACY_PROFILES: Dict[str, dict] = {
-    "salad_mix": {
-        "markdown_window_hours": 24,
-        "initial_inventory": 25,
-        "base_price": 3.50,
-        "base_markdown_demand": 5.0,
-        "price_elasticity": 3.5,
-        "cost_per_unit": 1.20,
-    },
-    "fresh_chicken": {
-        "markdown_window_hours": 24,
-        "initial_inventory": 15,
-        "base_price": 8.00,
-        "base_markdown_demand": 3.0,
-        "price_elasticity": 2.8,
-        "cost_per_unit": 4.00,
-    },
-    "yogurt": {
-        "markdown_window_hours": 24,
-        "initial_inventory": 30,
-        "base_price": 2.50,
-        "base_markdown_demand": 6.0,
-        "price_elasticity": 3.0,
-        "cost_per_unit": 0.80,
-    },
-    "bakery_bread": {
-        "markdown_window_hours": 24,
-        "initial_inventory": 18,
-        "base_price": 4.00,
-        "base_markdown_demand": 4.5,
-        "price_elasticity": 4.0,
-        "cost_per_unit": 1.50,
-    },
-    "sushi": {
-        "markdown_window_hours": 12,
-        "initial_inventory": 10,
-        "base_price": 10.00,
-        "base_markdown_demand": 2.5,
-        "price_elasticity": 2.5,
-        "cost_per_unit": 5.00,
-    },
 }
 
 # ── SKU generation ────────────────────────────────────────────────────────
@@ -232,16 +202,10 @@ def generate_catalog(seed: int = 42) -> Dict[str, dict]:
 
     catalog: Dict[str, dict] = {}
 
-    # Legacy products first
-    for name, profile in LEGACY_PROFILES.items():
-        catalog[name] = {**profile, "_category": "legacy", "_sku_name": name}
-
     # Generated SKUs
     rng = np.random.default_rng(seed)
     for cat_name, spec in CATEGORIES.items():
         for idx, sku_name in enumerate(spec.sku_names):
-            if sku_name in catalog:
-                continue  # skip if name collides with legacy
             catalog[sku_name] = generate_sku_profile(spec, sku_name, idx, rng)
 
     _catalog_cache = catalog
@@ -272,8 +236,8 @@ def get_profile(product_name: str) -> dict:
 
 
 def get_categories() -> List[str]:
-    """Return list of category names (including 'legacy')."""
-    return ["legacy"] + sorted(CATEGORIES.keys())
+    """Return list of category names."""
+    return sorted(CATEGORIES.keys())
 
 
 def print_catalog_summary():

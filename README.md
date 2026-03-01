@@ -21,7 +21,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 
 ### Key Features
 
-- **Product catalog**: 110 SKUs across 7 categories with realistic economics (seeded, reproducible)
+- **Product catalog**: 150 SKUs across 7 categories with realistic economics (seeded, reproducible)
 - **Custom Gymnasium environment** with configurable product profiles via product catalog
 - **Progressive discount constraint** enforced via action masking in both agent and baselines
 - **Double DQN** with soft target updates (tau=0.005) — PyTorch-based
@@ -98,18 +98,17 @@ python scripts/run_portfolio.py --episodes 500 --eval-episodes 100 \
 
 ## Product Catalog
 
-110 products across 8 categories (7 generated + 1 legacy):
+150 products across 7 categories:
 
 | Category | SKUs | Price Range | Window | Elasticity | Example SKUs |
 |----------|------|-------------|--------|------------|--------------|
-| **meats** | 15 | $5-15 | 24h | 2.5-3.5 | ground_beef_1lb, chicken_breast, lamb_chop |
-| **seafood** | 15 | $7-20 | 12-24h | 2.0-3.0 | salmon_fillet, shrimp_1lb, lobster_tail |
-| **vegetables** | 15 | $1.50-5 | 24h | 3.0-4.5 | salad_mix_5oz, asparagus_bunch, mushroom_8oz |
-| **fruits** | 15 | $2-7 | 24h | 3.0-4.0 | strawberries_1lb, avocado_3pk, blueberries_6oz |
-| **dairy** | 15 | $1.50-6 | 24h | 2.5-3.5 | yogurt_greek_plain, fresh_mozzarella, brie_wheel_8oz |
-| **bakery** | 15 | $2.50-7 | 24h | 3.5-4.5 | sourdough_loaf, croissants_4pk, bagels_6pk |
-| **deli_prepared** | 15 | $5-14 | 12-24h | 2.5-3.5 | rotisserie_chicken, sushi_roll_california, quiche_lorraine |
-| **legacy** | 5 | $2.50-10 | 12-24h | 2.5-4.0 | salad_mix, fresh_chicken, yogurt, bakery_bread, sushi |
+| **meats** | 22 | $5-15 | 24h | 2.5-3.5 | ground_beef_1lb, chicken_breast, lamb_chop |
+| **seafood** | 22 | $7-20 | 24h | 2.0-3.0 | salmon_fillet, shrimp_1lb, lobster_tail |
+| **vegetables** | 21 | $1.50-5 | 24h | 3.0-4.5 | salad_mix_5oz, asparagus_bunch, mushroom_8oz |
+| **fruits** | 21 | $2-7 | 24h | 3.0-4.0 | strawberries_1lb, avocado_3pk, blueberries_6oz |
+| **dairy** | 21 | $1.50-6 | 24h | 2.5-3.5 | yogurt_greek_plain, fresh_mozzarella, brie_wheel_8oz |
+| **bakery** | 21 | $2.50-7 | 24h | 3.5-4.5 | sourdough_loaf, croissants_4pk, bagels_6pk |
+| **deli_prepared** | 22 | $5-14 | 24h | 2.5-3.5 | rotisserie_chicken, sushi_roll_california, quiche_lorraine |
 
 ## How It Works
 
