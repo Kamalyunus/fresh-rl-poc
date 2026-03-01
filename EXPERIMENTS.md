@@ -609,7 +609,68 @@ python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
 
 ### Results
 
-*(to be filled after experiment)*
+| Metric | v1.0 (n_step=5) | v1.1 (exploration fix) |
+|--------|-----------------|------------------------|
+| Shaping wins | 52/110 (47%) | 48/110 (44%) |
+| Beats best baseline | 51/110 (46%) | **57/110 (52%)** |
+| Runtime (16 workers) | 32.2 min | 40.4 min |
+
+**By markdown window**:
+
+| Window | SKUs | v1.0 | v1.1 | Delta |
+|--------|------|------|------|-------|
+| 12h | 17 | 65% | 47% | -18pp |
+| 24h | 63 | 60% | **75%** | **+15pp** |
+| 48h | 30 | 7% | 7% | +0pp |
+
+**Category breakdown (beats-baseline %)**:
+
+| Category | v1.0 | v1.1 | Delta |
+|----------|------|------|-------|
+| meats | 40% | **80%** | **+40pp** |
+| deli_prepared | 60% | **80%** | **+20pp** |
+| bakery | 27% | **47%** | **+20pp** |
+| fruits | 47% | **53%** | +6pp |
+| seafood | 60% | 60% | same |
+| legacy | 80% | 40% | -40pp |
+| vegetables | 60% | 33% | -27pp |
+| dairy | 60% | 13% | -47pp |
+
+### Analysis: 48h Products — Wrong Diagnosis
+
+The initial hypothesis was that uniform epsilon-greedy exploration biased the agent toward deep discounting, preventing it from learning that holding is optimal for 48h products. **This was wrong.** Deep analysis of the 48h failures reveals the opposite problem:
+
+**1. Revenue is the sole failure mode — not waste**
+
+All 28/28 failures lose purely on revenue. Zero failures are due to waste. The DQN captures only 86% of baseline revenue on average (worst case: 76%). Every 48h product achieves 100% clearance — both DQN and baselines — with zero waste across the board.
+
+**2. Demand/inventory ratio explains everything**
+
+| Window | Demand/Inv Ratio | Strategic Challenge |
+|--------|-----------------|---------------------|
+| 12h | 0.38x | Clear inventory before deadline (waste risk) |
+| 24h | 0.78x | Balance clearance vs margin (sweet spot for DQN) |
+| 48h | 1.42x | Maximize revenue per unit (everything sells anyway) |
+
+48h products have total expected demand exceeding inventory by 42%. Everything sells regardless of pricing strategy. The only question is at what price — and simple baselines (Backloaded Progressive wins 61% of 48h failures, Fixed 20% wins 25%) apply consistent discounts that capture high-elasticity demand efficiently.
+
+**3. Hold-action bias made things worse**
+
+By biasing exploration toward *holding* (conservative pricing), we pushed the agent in exactly the wrong direction for 48h products. The optimal 48h strategy is to discount early and capture demand at good prices, not to hold at minimum discount. The 12h regression (-18pp) may also stem from this: 12h products have tight deadlines where the agent needs to explore aggressive discounting, not conservative holding.
+
+**4. The 2 winners are special cases**
+
+yogurt_greek_plain and whipped_cream_8oz beat baselines because they have lower price elasticity (2.83 vs 3.37 average) and higher margins — the only 48h products where conservative pricing actually helps.
+
+**5. 24h is the sweet spot**
+
+24h products improved from 60% to 75% (+15pp). At 0.78x demand/inventory, waste risk is real enough that the DQN's adaptive strategy matters, but inventory isn't so scarce that baselines trivially win on revenue.
+
+### Key Takeaway
+
+The 48h failure is **not an exploration problem** — it's a **structural problem**. When demand >> inventory, everything sells regardless of strategy, and the only differentiator is revenue per unit. Simple baselines that apply consistent discounts are hard to beat because there's no strategic complexity to exploit. The DQN's advantage — adapting to waste risk — is irrelevant when waste risk is zero.
+
+The overall improvement (+6pp beats-baseline, new best 52%) was driven by 24h products where the exploration fix + projected clearance feature genuinely helped the agent learn better timing.
 
 ---
 
@@ -641,6 +702,8 @@ Shaping is neutral/noise when:
 | Transfer learning + short fine-tuning | Pre-trained weights amplify shaping advantage (59% win rate) with 2.5x compute savings |
 | Bigger network + longer training (128-dim, 3000ep) | Single biggest lever for beats-baseline: 22% → 43% (+21pp) |
 | N-step returns (n=5) | New best beats-baseline: 43% → 46% (+3pp) via faster credit assignment in short episodes |
+| Projected clearance feature (velocity-based) | Observable "will I clear at current pace?" signal — helped 24h products reach 75% beats-baseline |
+| Hold-action exploration + conservative prefill | New best overall: 52% beats-baseline (+6pp), driven by 24h product improvement |
 
 ### What didn't work / watch out for
 
@@ -655,3 +718,5 @@ Shaping is neutral/noise when:
 | TL + very long fine-tuning (3000ep) | TL slightly hurts vs no-TL (40% vs 43% beats-baseline) — category pre-training can introduce interference with enough direct training |
 | High replay ratio to halve episodes (rr=4, 1500ep) | Online exploration is the bottleneck, not sample efficiency — 15% beats-baseline vs 43% with rr=1 at 3000ep, and 2x slower |
 | N-step returns reduce shaping benefit | N-step and shaping both accelerate reward propagation — their benefits overlap, dropping shaping win rate from 57% to 47% |
+| Hold-action bias on 48h products | 48h products need *more* discounting, not less — hold bias pushed the agent in the wrong direction. 48h failure is structural (demand >> inventory), not an exploration problem |
+| Projected clearance leaking simulator data | Initial implementation used demand model internals (elasticity, intraday pattern) — had to hotfix to velocity-based `(recent_velocity * remaining_steps) / inventory` |
