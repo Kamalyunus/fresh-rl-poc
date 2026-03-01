@@ -760,48 +760,51 @@ python scripts/run_portfolio.py --episodes 500 --eval-episodes 100 \
     --transfer-learning --pretrain-episodes 1500
 
 # v1.3.1: TL with 2000 fine-tune episodes (31% compute savings)
-python scripts/run_portfolio.py --episodes 2000 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
-    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
-    --transfer-learning --pretrain-episodes 1500
+python scripts/run_portfolio.py --episodes 2000 ... --transfer-learning --pretrain-episodes 1500
+
+# v1.3.2: TL with 3000 fine-tune episodes (equal fine-tune, tests whether TL helps or hurts)
+python scripts/run_portfolio.py --episodes 3000 ... --transfer-learning --pretrain-episodes 1500
 ```
 
 ### Results
 
-| Metric | v1.2 (no TL, 3000ep) | v1.3 (TL, 500ft) | v1.3.1 (TL, 2000ft) |
-|--------|---------------------|-------------------|----------------------|
-| Beats best baseline | **122/150 (81%)** | 38/150 (25%) | 82/150 (55%) |
-| Shaping wins | 71/150 (47%) | 85/150 (57%) | 80/150 (53%) |
-| Plain > baseline | 117/150 (78%) | 43/150 (29%) | 82/150 (55%) |
-| Mean reward (shaped) | 140.5 | 130.2 | 137.2 |
-| Mean revenue (shaped) | $114.7 | $103.8 | $103.8 |
-| Total episodes | 450K | 85.5K | 310.5K |
-| Runtime (16 workers) | ~45 min | ~10 min | ~35 min |
+| Metric | v1.2 (no TL, 3000ep) | v1.3 (TL, 500ft) | v1.3.1 (TL, 2000ft) | v1.3.2 (TL, 3000ft) |
+|--------|---------------------|-------------------|----------------------|----------------------|
+| Beats best baseline | **122/150 (81%)** | 38/150 (25%) | 82/150 (55%) | 106/150 (71%) |
+| Shaping wins | 71/150 (47%) | 85/150 (57%) | 80/150 (53%) | 63/150 (42%) |
+| Plain > baseline | 117/150 (78%) | 43/150 (29%) | 82/150 (55%) | 103/150 (69%) |
+| Mean reward (shaped) | 140.5 | 130.2 | 137.2 | 139.2 |
+| Mean revenue (shaped) | $114.7 | $103.8 | $103.8 | — |
+| Total episodes | 450K | 85.5K | 310.5K | 460.5K |
+| Runtime (16 workers) | ~45 min | ~10 min | ~35 min | ~53 min |
 
-**Category breakdown (v1.3.1 — TL + 2000 fine-tune)**:
+**Category breakdown (v1.3.2 — TL + 3000 fine-tune vs v1.2 no TL)**:
 
-| Category | SKUs | Beats BL | v1.2 Beats BL |
-|----------|------|----------|---------------|
-| fruits | 21 | 67% | 81% |
-| bakery | 21 | 62% | 67% |
-| vegetables | 21 | 62% | 86% |
-| deli_prepared | 22 | 55% | 91% |
-| seafood | 22 | 50% | 82% |
-| dairy | 21 | 48% | 76% |
-| meats | 22 | 32% | 86% |
+| Category | SKUs | v1.3.2 Beats BL | v1.2 Beats BL | Delta |
+|----------|------|-----------------|---------------|-------|
+| deli_prepared | 22 | 64% | 91% | -27pp |
+| bakery | 21 | 62% | 67% | -5pp |
+| fruits | 21 | 38% | 81% | -43pp |
+| dairy | 21 | 38% | 76% | -38pp |
+| meats | 22 | 32% | 86% | -54pp |
+| seafood | 22 | 32% | 82% | -50pp |
+| vegetables | 21 | 29% | 86% | -57pp |
 
 ### Analysis
 
-1. **TL with 500 fine-tune (v1.3) fails badly at 25%**: Epsilon is still ~0.6 after 500 episodes (decay=0.999), so the agent barely finishes exploring before training ends. The category pre-training provides a warm start, but it's overwhelmed by incomplete convergence.
+1. **TL with 500 fine-tune (v1.3) fails badly at 25%**: Epsilon is still ~0.6 after 500 episodes (decay=0.999), so the agent barely finishes exploring before training ends.
 
-2. **TL with 2000 fine-tune (v1.3.1) reaches 55%**: Much better but still 26pp below v1.2. The 31% compute savings (310K vs 450K episodes) isn't worth the drop.
+2. **TL with 2000 fine-tune (v1.3.1) reaches 55%**: Better but still 26pp below v1.2.
 
-3. **Category models don't transfer well to individual SKUs**: Within a category like meats ($5-15, elasticity 2.5-3.5), individual SKUs vary substantially. A $5 ground beef behaves very differently from a $15 ribeye. The pre-trained category policy is too generic to provide a meaningful head start.
+3. **TL with 3000 fine-tune (v1.3.2) reaches 71% — still 10pp below v1.2, and takes longer**: With equal fine-tuning episodes (3000), TL is strictly worse: -10pp beats-baseline and +18% runtime from the pretrain overhead. This is the definitive test — the category pre-training actively hurts.
 
-4. **Meats drops hardest (86% → 32%)**: The widest price range category ($5-15) suffers most from category-level averaging — the generic policy doesn't match any specific SKU well.
+4. **TL hurts most in high-variance categories**: Meats (-54pp), vegetables (-57pp), and seafood (-50pp) have the widest price/demand ranges within each category. The pre-trained weights bias the agent toward a generic policy that interferes with SKU-specific optimization.
 
-**Learning**: **Transfer learning provides diminishing returns when SKU-level variation within categories is high.** With 21-22 SKUs per category spanning wide price/demand ranges, the category model learns a blurred average policy. Direct per-SKU training for 3000 episodes remains optimal. TL would work better if categories had tighter SKU similarity (e.g., price ranges of $2 instead of $10).
+5. **Bakery is least affected (-5pp)**: The narrowest price range category ($2.50-7) with the highest elasticity (3.5-4.5) — SKUs are similar enough that the category model provides a reasonable starting point.
+
+6. **More fine-tuning monotonically improves TL** (25% → 55% → 71%) but can't close the gap — the pre-trained weights create a local optimum that the agent struggles to escape even with 3000 episodes.
+
+**Learning**: **Transfer learning introduces negative transfer when intra-category SKU variation is high.** The category pre-training learns a blurred average policy that biases the agent's starting point. With enough fine-tuning, the agent partially overcomes this bias (71%) but never matches training from scratch (81%). The pre-trained weights act as a regularizer toward the category average — helpful if SKUs are similar, harmful if they're diverse. Direct per-SKU training for 3000 episodes remains the best approach for this catalog.
 
 ---
 
@@ -845,8 +848,9 @@ Shaping is neutral/noise when:
 | Fast epsilon decay (0.998) with 1500 episodes | Use 0.999 to keep exploring longer |
 | Shaping on easy products (0% waste) | It's just noise — don't expect improvement when the problem is already solved |
 | DQN generates less raw revenue than baselines | Expected — DQN optimizes total reward (revenue minus waste), not revenue alone |
-| TL with wide-range categories | Category models average across $5-$15 SKUs, producing a generic policy that doesn't match any specific SKU — 55% beats-baseline (2000ft) vs 81% without TL |
+| TL with wide-range categories | Category pre-training introduces negative transfer — 71% beats-baseline with 3000ft vs 81% without TL, despite more total compute. Pre-trained weights bias toward category-average policy |
 | TL + short fine-tuning (500ep) | Epsilon still ~0.6 after 500 episodes (decay=0.999) — agent doesn't finish exploring. Only 25% beats-baseline |
+| TL + equal fine-tuning (3000ep) | Strictly worse than no TL: -10pp beats-baseline and +18% runtime. The definitive test that TL hurts for this catalog's diversity level |
 | High replay ratio to halve episodes (rr=4, 1500ep) | Online exploration is the bottleneck, not sample efficiency — 15% beats-baseline vs 43% with rr=1 at 3000ep, and 2x slower |
 | N-step returns reduce shaping benefit | N-step and shaping both accelerate reward propagation — their benefits overlap, dropping shaping win rate from 57% to 47% |
 | Hold-action bias on 48h products | 48h products need *more* discounting, not less — hold bias pushed the agent in the wrong direction. 48h failure is structural (demand >> inventory), not an exploration problem |
