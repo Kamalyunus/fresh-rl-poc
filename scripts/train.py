@@ -35,6 +35,7 @@ def train(
     shaping_ratio: float = 0.2,
     env_overrides: dict = None,
     epsilon_decay: float = None,
+    pretrained_path: str = None,
 ):
     """Train a DQN agent and save results."""
 
@@ -84,6 +85,8 @@ def train(
         if warmup_epsilon is not None:
             print(f"  Warm-up epsilon:   {warmup_epsilon}")
     print(f"  Seed:              {seed}")
+    if pretrained_path:
+        print(f"  Pre-trained:       {os.path.basename(pretrained_path)}")
     print(f"{'='*60}\n")
 
     # Create agent
@@ -103,6 +106,13 @@ def train(
         seed=seed,
         use_per=use_per,
     )
+
+    # Transfer learning: load pre-trained weights
+    if pretrained_path:
+        agent.load_pretrained(pretrained_path)
+        agent.epsilon = 0.3  # Lower starting exploration for fine-tuning
+        print(f"  [TRANSFER] Loaded pre-trained weights from {os.path.basename(pretrained_path)}")
+        print(f"  [TRANSFER] Fine-tuning epsilon: {agent.epsilon}\n")
 
     # Pre-fill phase: load historical data into replay buffer
     if prefill:

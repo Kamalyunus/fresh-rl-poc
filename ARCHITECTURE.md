@@ -1085,6 +1085,39 @@ epsilon_{t+1} = max(epsilon_end, epsilon_t * epsilon_decay)
 
 The 2h mode uses slower decay because the action space is nearly 2x larger (11 vs 6 actions) — the agent needs more exploration to cover the expanded policy space.
 
+### Transfer Learning
+
+Two-phase training that pools category-level experience before specializing per SKU:
+
+```
+Phase 1: Pre-train per category
+  For each category (meats, seafood, ...):
+    1. Create one DQN agent (reward_shaping=False)
+    2. Train for N episodes, cycling through all products in the category
+       - Episode i trains on products[i % len(products)]
+       - Different seed per episode (seed + ep) for variety
+    3. Save model as pretrained_{category}_{step_hours}h.pt
+
+Phase 2: Fine-tune per SKU
+  For each product:
+    1. Create fresh DQN agent
+    2. Load pre-trained category weights via load_pretrained()
+       - Copies q_network weights into both q_network and target_network
+       - Ignores optimizer state, epsilon, training history
+    3. Set epsilon = 0.3 (lower starting exploration)
+    4. Train for M episodes (standard pipeline: both plain and shaped)
+```
+
+**Why it works**: Products within a category share similar demand patterns, price ranges, and elasticity profiles. Pre-training on 15 SKUs pools ~15x more experience for learning general timing/urgency patterns. Fine-tuning then adapts to each SKU's specific characteristics with less exploration needed.
+
+**Architecture compatibility**: All products with the same `step_hours` share `state_dim=9` and the same `n_actions`, so weights transfer directly without any adaptation layers.
+
+**`load_pretrained()` method** (`DQNAgent`):
+- Loads only `q_network` state dict from the saved checkpoint
+- Copies those weights into both `q_network` and `target_network` (target synced)
+- Does NOT restore optimizer state, epsilon, train_step, losses, or episode_rewards
+- The agent starts fresh for fine-tuning but with learned representations
+
 ---
 
 ## Portfolio Runner

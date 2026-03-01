@@ -300,3 +300,9 @@ class DQNAgent:
         self.train_step = data["train_step"]
         self.losses = data.get("losses", [])
         self.episode_rewards = data.get("episode_rewards", [])
+
+    def load_pretrained(self, path):
+        """Load only network weights from a pre-trained agent (no optimizer/epsilon/history)."""
+        data = torch.load(path, map_location=self.device, weights_only=False)
+        self.q_network.load_state_dict(data["q_network"])
+        self.target_network.load_state_dict(data["q_network"])  # sync target to q_network

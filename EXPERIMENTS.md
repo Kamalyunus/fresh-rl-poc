@@ -305,6 +305,37 @@ No changes needed to `dqn_agent.py`, `train.py`, `evaluate.py`, `run_portfolio.p
 
 ---
 
+## Iteration 8: Transfer Learning — Category Pre-training + Per-SKU Fine-tuning
+
+**Goal**: Pool category-level experience to learn general timing/urgency patterns, then fine-tune per SKU with less training budget.
+
+**Changes**:
+- Added `load_pretrained()` method to `DQNAgent` — loads only network weights, ignores optimizer/epsilon/history
+- Added `pretrained_path` parameter to `train()` — loads pre-trained weights and sets epsilon=0.3 for fine-tuning
+- Added `--transfer-learning` and `--pretrain-episodes` flags to `run_portfolio.py`
+- Added `_pretrain_category()` function — trains one agent per category by cycling through all products
+- Two-phase orchestration in `main()`: category pre-training (parallel) → per-SKU fine-tuning (parallel)
+
+**Design**:
+
+Phase 1: Pre-train one agent per category on all products in that category (no reward shaping). Cycling through SKUs means the agent sees diverse demand/elasticity profiles within the category.
+
+Phase 2: Load pre-trained weights into fresh agents, set epsilon=0.3 (less exploration needed), train for fewer episodes. Both plain and shaped variants fine-tuned.
+
+**Compute savings**: With 8 categories × 1500 pretrain + 110 × 500 finetune = 67,000 episodes vs 110 × 1500 = 165,000 episodes without TL (2.5x fewer total episodes).
+
+**Verification command**:
+```bash
+python scripts/run_portfolio.py --products salmon_fillet sushi salad_mix \
+    --episodes 500 --eval-episodes 50 --step-hours 2 --per --prefill --warmup-steps 500 \
+    --transfer-learning --pretrain-episodes 300 \
+    --demand-mult 0.5 --inventory-mult 2.0 --save-dir results/tl_test
+```
+
+**Results**: Pending first full portfolio run with transfer learning.
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps

@@ -31,6 +31,81 @@ from fresh_rl.product_catalog import (
 )
 
 
+# ── Category pre-training (runs in worker process) ───────────────────────
+
+def _pretrain_category(
+    category,
+    products,
+    total_episodes,
+    step_hours,
+    seed,
+    save_dir,
+    use_per,
+    demand_mult,
+    inventory_mult,
+    epsilon_decay,
+):
+    """Pre-train one agent on all products in a category."""
+    from fresh_rl.environment import MarkdownProductEnv
+    from fresh_rl.dqn_agent import DQNAgent
+    from fresh_rl.product_catalog import generate_catalog
+
+    os.makedirs(save_dir, exist_ok=True)
+    catalog = generate_catalog()
+
+    # Get dims from first product
+    sample_env = MarkdownProductEnv(products[0], step_hours=step_hours, seed=seed)
+    state_dim = sample_env.observation_space.shape[0]
+    n_actions = sample_env.action_space.n
+
+    agent = DQNAgent(
+        state_dim=state_dim, n_actions=n_actions, hidden_dim=64,
+        lr=5e-4, gamma=0.97, epsilon_start=1.0, epsilon_end=0.05,
+        epsilon_decay=epsilon_decay or 0.999,
+        buffer_size=10000, batch_size=32,
+        reward_shaping=False,  # no shaping during pre-training
+        seed=seed, use_per=use_per,
+    )
+
+    print(f"  [PRETRAIN] {category}: {len(products)} products, {total_episodes} episodes")
+
+    for ep in range(total_episodes):
+        product = products[ep % len(products)]
+        profile = catalog[product]
+
+        env_kwargs = dict(product_name=product, step_hours=step_hours, seed=seed + ep)
+        if demand_mult != 1.0:
+            env_kwargs["base_markdown_demand"] = round(
+                profile.get("base_markdown_demand", 5.0) * demand_mult, 1)
+        if inventory_mult != 1.0:
+            env_kwargs["initial_inventory"] = int(
+                profile.get("initial_inventory", 20) * inventory_mult)
+
+        env = MarkdownProductEnv(**env_kwargs)
+        obs, _ = env.reset()
+        done = False
+
+        while not done:
+            mask = env.action_masks()
+            action = agent.select_action(obs, action_mask=mask)
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+            next_mask = env.action_masks() if not done else np.ones(n_actions, dtype=bool)
+            agent.store_transition(obs, action, reward, next_obs, done, next_mask)
+            agent.train_step_fn()
+            obs = next_obs
+
+        agent.decay_epsilon()
+
+        if (ep + 1) % 500 == 0:
+            print(f"    {category}: episode {ep+1}/{total_episodes}, eps={agent.epsilon:.3f}")
+
+    model_path = os.path.join(save_dir, f"pretrained_{category}_{step_hours}h.pt")
+    agent.save(model_path)
+    print(f"  [PRETRAIN] {category}: saved to {model_path}")
+    return model_path
+
+
 # ── Single-product pipeline (runs in worker process) ─────────────────────
 
 def _run_single_product(
@@ -48,6 +123,7 @@ def _run_single_product(
     demand_mult: float = 1.0,
     inventory_mult: float = 1.0,
     epsilon_decay: float = None,
+    pretrained_path: str = None,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -106,6 +182,7 @@ def _run_single_product(
             reward_shaping=False,
             seed=seed,
             save_dir=product_dir,
+            pretrained_path=pretrained_path,
             **per_kwargs,
         )
 
@@ -117,6 +194,7 @@ def _run_single_product(
             reward_shaping=True,
             seed=seed,
             save_dir=product_dir,
+            pretrained_path=pretrained_path,
             **per_kwargs,
         )
 
@@ -418,6 +496,12 @@ def main():
     parser.add_argument("--epsilon-decay", type=float, default=None,
                         help="Epsilon decay rate per episode (default: 0.998 for 2h, 0.997 for 4h)")
 
+    # Transfer learning
+    parser.add_argument("--transfer-learning", action="store_true",
+                        help="Pre-train per category, then fine-tune per SKU")
+    parser.add_argument("--pretrain-episodes", type=int, default=1500,
+                        help="Pre-training episodes per category (default: 1500)")
+
     args = parser.parse_args()
 
     # Build product list
@@ -461,6 +545,8 @@ def main():
         print(f"  Demand mult:    {args.demand_mult}x")
     if args.inventory_mult != 1.0:
         print(f"  Inventory mult: {args.inventory_mult}x")
+    if args.transfer_learning:
+        print(f"  Transfer learn: ON ({args.pretrain_episodes} pretrain episodes)")
     print(f"  Workers:        {args.workers}")
     print(f"  Save dir:       {args.save_dir}")
     print(f"{'='*70}\n")
@@ -481,6 +567,62 @@ def main():
         epsilon_decay=args.epsilon_decay,
     )
 
+    # ── Phase 1: Category pre-training (if transfer learning enabled) ────
+    pretrained_paths = {}  # product_name -> model_path
+    if args.transfer_learning:
+        catalog = generate_catalog()
+        categories_to_train = {}
+        for p in products:
+            cat = catalog[p].get("_category", "unknown")
+            categories_to_train.setdefault(cat, []).append(p)
+
+        pretrain_dir = os.path.join(args.save_dir, "_pretrained")
+
+        print(f"\n  Phase 1: Pre-training {len(categories_to_train)} categories "
+              f"({args.pretrain_episodes} episodes each)\n")
+
+        pretrain_kwargs = dict(
+            total_episodes=args.pretrain_episodes,
+            step_hours=args.step_hours,
+            seed=args.seed,
+            save_dir=pretrain_dir,
+            use_per=args.per,
+            demand_mult=args.demand_mult,
+            inventory_mult=args.inventory_mult,
+            epsilon_decay=args.epsilon_decay,
+        )
+
+        if args.workers > 1:
+            with ProcessPoolExecutor(
+                max_workers=min(args.workers, len(categories_to_train))
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _pretrain_category,
+                        category=cat,
+                        products=cat_products,
+                        **pretrain_kwargs,
+                    ): (cat, cat_products)
+                    for cat, cat_products in categories_to_train.items()
+                }
+                for future in as_completed(futures):
+                    cat, cat_products = futures[future]
+                    model_path = future.result()
+                    for p in cat_products:
+                        pretrained_paths[p] = model_path
+        else:
+            for cat, cat_products in categories_to_train.items():
+                model_path = _pretrain_category(
+                    category=cat,
+                    products=cat_products,
+                    **pretrain_kwargs,
+                )
+                for p in cat_products:
+                    pretrained_paths[p] = model_path
+
+        print(f"\n  Phase 1 complete. Pre-trained {len(categories_to_train)} category models.")
+        print(f"  Phase 2: Fine-tuning {len(products)} SKUs ({args.episodes} episodes each)\n")
+
     all_results = []
     start_time = time.time()
 
@@ -500,7 +642,11 @@ def main():
         # Parallel execution
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(_run_single_product, product=p, **common_kwargs): p
+                executor.submit(
+                    _run_single_product, product=p,
+                    pretrained_path=pretrained_paths.get(p),
+                    **common_kwargs,
+                ): p
                 for p in products
             }
             for i, future in enumerate(as_completed(futures), 1):
@@ -522,7 +668,11 @@ def main():
         # Sequential execution
         for i, p in enumerate(products, 1):
             print(f"\n  [{i}/{len(products)}] Running: {p}")
-            result = _run_single_product(product=p, **common_kwargs)
+            result = _run_single_product(
+                product=p,
+                pretrained_path=pretrained_paths.get(p),
+                **common_kwargs,
+            )
             all_results.append(result)
 
             status = "OK" if result["status"] == "ok" else "ERROR"

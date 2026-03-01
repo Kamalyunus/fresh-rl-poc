@@ -29,6 +29,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Historical data pre-filling** from baseline policies to bootstrap the replay buffer
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
 - **7 baseline policies** for rigorous comparison
+- **Transfer learning**: category pre-training pools experience across SKUs, per-SKU fine-tuning adapts to individual demand profiles (2.5x compute savings)
 - **Portfolio runner** for cross-category validation with parallel workers
 - **Visualization suite**: training curves, policy comparison, policy heatmaps, episode walkthroughs, revenue-waste Pareto, training dashboard, category heatmap, and discount progression
 
@@ -84,6 +85,12 @@ python scripts/run_portfolio.py --episodes 1500 --eval-episodes 100 \
 
 # Run a single product via portfolio runner
 python scripts/run_portfolio.py --products salmon_fillet --episodes 1500
+
+# Run portfolio with transfer learning (category pre-training + per-SKU fine-tuning)
+python scripts/run_portfolio.py --episodes 500 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 4 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --transfer-learning --pretrain-episodes 1500
 ```
 
 ## Product Catalog
