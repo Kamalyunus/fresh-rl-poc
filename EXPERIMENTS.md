@@ -743,6 +743,68 @@ python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
 
 ---
 
+## Iteration 14: Transfer Learning Revisited (150 SKUs)
+
+**Commit**: `d099fd8`
+
+**Hypothesis**: Transfer learning (category pre-training + per-SKU fine-tuning) can match v1.2's 81% beats-baseline with less compute by giving each SKU a warm start from its category model.
+
+**Setup**: Same environment settings as v1.2 (0.5x demand, 2x inventory, all flags), with transfer learning enabled:
+
+```bash
+# v1.3: TL with 500 fine-tune episodes (2.5x compute savings)
+python scripts/run_portfolio.py --episodes 500 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --transfer-learning --pretrain-episodes 1500
+
+# v1.3.1: TL with 2000 fine-tune episodes (31% compute savings)
+python scripts/run_portfolio.py --episodes 2000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --transfer-learning --pretrain-episodes 1500
+```
+
+### Results
+
+| Metric | v1.2 (no TL, 3000ep) | v1.3 (TL, 500ft) | v1.3.1 (TL, 2000ft) |
+|--------|---------------------|-------------------|----------------------|
+| Beats best baseline | **122/150 (81%)** | 38/150 (25%) | 82/150 (55%) |
+| Shaping wins | 71/150 (47%) | 85/150 (57%) | 80/150 (53%) |
+| Plain > baseline | 117/150 (78%) | 43/150 (29%) | 82/150 (55%) |
+| Mean reward (shaped) | 140.5 | 130.2 | 137.2 |
+| Mean revenue (shaped) | $114.7 | $103.8 | $103.8 |
+| Total episodes | 450K | 85.5K | 310.5K |
+| Runtime (16 workers) | ~45 min | ~10 min | ~35 min |
+
+**Category breakdown (v1.3.1 — TL + 2000 fine-tune)**:
+
+| Category | SKUs | Beats BL | v1.2 Beats BL |
+|----------|------|----------|---------------|
+| fruits | 21 | 67% | 81% |
+| bakery | 21 | 62% | 67% |
+| vegetables | 21 | 62% | 86% |
+| deli_prepared | 22 | 55% | 91% |
+| seafood | 22 | 50% | 82% |
+| dairy | 21 | 48% | 76% |
+| meats | 22 | 32% | 86% |
+
+### Analysis
+
+1. **TL with 500 fine-tune (v1.3) fails badly at 25%**: Epsilon is still ~0.6 after 500 episodes (decay=0.999), so the agent barely finishes exploring before training ends. The category pre-training provides a warm start, but it's overwhelmed by incomplete convergence.
+
+2. **TL with 2000 fine-tune (v1.3.1) reaches 55%**: Much better but still 26pp below v1.2. The 31% compute savings (310K vs 450K episodes) isn't worth the drop.
+
+3. **Category models don't transfer well to individual SKUs**: Within a category like meats ($5-15, elasticity 2.5-3.5), individual SKUs vary substantially. A $5 ground beef behaves very differently from a $15 ribeye. The pre-trained category policy is too generic to provide a meaningful head start.
+
+4. **Meats drops hardest (86% → 32%)**: The widest price range category ($5-15) suffers most from category-level averaging — the generic policy doesn't match any specific SKU well.
+
+**Learning**: **Transfer learning provides diminishing returns when SKU-level variation within categories is high.** With 21-22 SKUs per category spanning wide price/demand ranges, the category model learns a blurred average policy. Direct per-SKU training for 3000 episodes remains optimal. TL would work better if categories had tighter SKU similarity (e.g., price ranges of $2 instead of $10).
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps
@@ -783,8 +845,8 @@ Shaping is neutral/noise when:
 | Fast epsilon decay (0.998) with 1500 episodes | Use 0.999 to keep exploring longer |
 | Shaping on easy products (0% waste) | It's just noise — don't expect improvement when the problem is already solved |
 | DQN generates less raw revenue than baselines | Expected — DQN optimizes total reward (revenue minus waste), not revenue alone |
-| TL + long fine-tuning (1500ep) | Shaping advantage disappears as plain DQN also fully converges — use shorter fine-tuning (500-800ep) to preserve the TL benefit |
-| TL + very long fine-tuning (3000ep) | TL slightly hurts vs no-TL (40% vs 43% beats-baseline) — category pre-training can introduce interference with enough direct training |
+| TL with wide-range categories | Category models average across $5-$15 SKUs, producing a generic policy that doesn't match any specific SKU — 55% beats-baseline (2000ft) vs 81% without TL |
+| TL + short fine-tuning (500ep) | Epsilon still ~0.6 after 500 episodes (decay=0.999) — agent doesn't finish exploring. Only 25% beats-baseline |
 | High replay ratio to halve episodes (rr=4, 1500ep) | Online exploration is the bottleneck, not sample efficiency — 15% beats-baseline vs 43% with rr=1 at 3000ep, and 2x slower |
 | N-step returns reduce shaping benefit | N-step and shaping both accelerate reward propagation — their benefits overlap, dropping shaping win rate from 57% to 47% |
 | Hold-action bias on 48h products | 48h products need *more* discounting, not less — hold bias pushed the agent in the wrong direction. 48h failure is structural (demand >> inventory), not an exploration problem |
