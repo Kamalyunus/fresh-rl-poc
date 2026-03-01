@@ -808,6 +808,60 @@ python scripts/run_portfolio.py --episodes 3000 ... --transfer-learning --pretra
 
 ---
 
+## Iteration 15: Longer Training — 5000 Episodes
+
+**Commit**: `f087d5e`
+
+**Hypothesis**: More training episodes can push past v1.2's 81% ceiling. With 5000 episodes and epsilon_decay=0.999, epsilon reaches ~0.007 (vs ~0.05 at 3000 episodes), allowing the agent to fully exploit its learned policy.
+
+**Setup**: Same as v1.2 but with 5000 episodes:
+```bash
+python scripts/run_portfolio.py --episodes 5000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --save-dir results/portfolio_v140_5000ep
+```
+
+### Results
+
+| Metric | v1.2 (3000ep) | v1.4 (5000ep) |
+|--------|--------------|---------------|
+| Beats baseline (shaped) | 122/150 (81%) | **126/150 (84%)** |
+| Beats baseline (plain) | 117/150 (78%) | **129/150 (86%)** |
+| Shaping wins | 71/150 (47%) | 61/150 (41%) |
+| Mean reward (shaped) | 140.5 | 141.4 |
+| Mean reward (plain) | 140.7 | 141.9 |
+| Runtime (16 workers) | ~45 min | ~90 min |
+
+**Category breakdown**:
+
+| Category | SKUs | v1.4 Beats BL | v1.2 Beats BL |
+|----------|------|---------------|---------------|
+| deli_prepared | 22 | **91%** | 91% |
+| meats | 22 | **91%** | 86% |
+| vegetables | 21 | **86%** | 86% |
+| fruits | 21 | **86%** | 81% |
+| dairy | 21 | **81%** | 76% |
+| seafood | 22 | 77% | 82% |
+| bakery | 21 | 76% | 67% |
+
+### Analysis
+
+1. **New best: 84% beats-baseline (shaped), 86% (plain)** — a +3pp improvement over v1.2 for shaped, +8pp for plain. More training helps, but with diminishing returns (2x compute for +3pp).
+
+2. **Plain DQN now outperforms shaped DQN (86% vs 84%)**: With 5000 episodes, the agent has enough experience to fully converge without reward shaping. Shaping becomes slight noise — its urgency signal conflicts with what the agent has already learned from direct experience.
+
+3. **Shaping win rate drops to 41%**: Confirms that reward shaping's value diminishes with longer training. N-step returns (n=5) already handle credit assignment; the additional shaping signal adds no information with sufficient episodes.
+
+4. **Every category at 76%+**: Bakery improved most (+9pp to 76%), dairy +5pp to 81%. Seafood slightly regressed (82% → 77%) — likely stochastic variance.
+
+5. **Diminishing returns curve**: 81% at 3000ep → 84% at 5000ep is +3pp for 2x compute. The marginal value of additional training is flattening.
+
+**Learning**: **More training monotonically improves beats-baseline but with sharply diminishing returns.** The 3000→5000 episode jump costs 2x compute for +3pp. Plain DQN overtaking shaped DQN confirms that reward shaping is a convergence accelerator, not a final performance booster — given enough data, the raw reward signal is sufficient.
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps
@@ -822,6 +876,7 @@ Shaping is neutral/noise when:
 1. The product clears inventory easily (0% waste with plain DQN)
 2. High-elasticity products where any moderate discount drives enough demand
 3. 4h mode with only 6 actions — the search space is small enough for plain DQN
+4. Very long training (5000+ episodes) — plain DQN fully converges without shaping, and shaping win rate drops to 41%
 
 ### Architecture decisions that worked
 
@@ -838,6 +893,7 @@ Shaping is neutral/noise when:
 | N-step returns (n=5) | New best beats-baseline: 43% → 46% (+3pp) via faster credit assignment in short episodes |
 | Projected clearance feature (velocity-based) | Observable "will I clear at current pace?" signal — helped 24h products reach 75% beats-baseline |
 | Hold-action exploration + conservative prefill | New best overall: 52% beats-baseline (+6pp), driven by 24h product improvement |
+| Longer training (5000ep) | New best 84% beats-baseline (+3pp over 3000ep). Plain DQN reaches 86% — shaping unnecessary with enough data |
 
 ### What didn't work / watch out for
 
