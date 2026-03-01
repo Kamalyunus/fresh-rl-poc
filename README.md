@@ -104,12 +104,12 @@ python scripts/run_portfolio.py --episodes 500 --eval-episodes 100 \
 |----------|------|-------------|--------|------------|--------------|
 | **meats** | 15 | $5-15 | 24h | 2.5-3.5 | ground_beef_1lb, chicken_breast, lamb_chop |
 | **seafood** | 15 | $7-20 | 12-24h | 2.0-3.0 | salmon_fillet, shrimp_1lb, lobster_tail |
-| **vegetables** | 15 | $1.50-5 | 24-48h | 3.0-4.5 | salad_mix_5oz, asparagus_bunch, mushroom_8oz |
-| **fruits** | 15 | $2-7 | 24-48h | 3.0-4.0 | strawberries_1lb, avocado_3pk, blueberries_6oz |
-| **dairy** | 15 | $1.50-6 | 48h | 2.5-3.5 | yogurt_greek_plain, fresh_mozzarella, brie_wheel_8oz |
+| **vegetables** | 15 | $1.50-5 | 24h | 3.0-4.5 | salad_mix_5oz, asparagus_bunch, mushroom_8oz |
+| **fruits** | 15 | $2-7 | 24h | 3.0-4.0 | strawberries_1lb, avocado_3pk, blueberries_6oz |
+| **dairy** | 15 | $1.50-6 | 24h | 2.5-3.5 | yogurt_greek_plain, fresh_mozzarella, brie_wheel_8oz |
 | **bakery** | 15 | $2.50-7 | 24h | 3.5-4.5 | sourdough_loaf, croissants_4pk, bagels_6pk |
 | **deli_prepared** | 15 | $5-14 | 12-24h | 2.5-3.5 | rotisserie_chicken, sushi_roll_california, quiche_lorraine |
-| **legacy** | 5 | $2.50-10 | 12-48h | 2.5-4.0 | salad_mix, fresh_chicken, yogurt, bakery_bread, sushi |
+| **legacy** | 5 | $2.50-10 | 12-24h | 2.5-4.0 | salad_mix, fresh_chicken, yogurt, bakery_bread, sushi |
 
 ## How It Works
 

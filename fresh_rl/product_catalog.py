@@ -65,7 +65,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
     ),
     "vegetables": CategorySpec(
         name="vegetables",
-        markdown_window_options=[24, 48],
+        markdown_window_options=[24],
         price_range=(1.50, 5.0),
         elasticity_range=(3.0, 4.5),
         cost_fraction_range=(0.30, 0.45),
@@ -80,7 +80,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
     ),
     "fruits": CategorySpec(
         name="fruits",
-        markdown_window_options=[24, 48],
+        markdown_window_options=[24],
         price_range=(2.0, 7.0),
         elasticity_range=(3.0, 4.0),
         cost_fraction_range=(0.30, 0.45),
@@ -95,7 +95,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
     ),
     "dairy": CategorySpec(
         name="dairy",
-        markdown_window_options=[48],
+        markdown_window_options=[24],
         price_range=(1.50, 6.0),
         elasticity_range=(2.5, 3.5),
         cost_fraction_range=(0.25, 0.40),
@@ -163,7 +163,7 @@ LEGACY_PROFILES: Dict[str, dict] = {
         "cost_per_unit": 4.00,
     },
     "yogurt": {
-        "markdown_window_hours": 48,
+        "markdown_window_hours": 24,
         "initial_inventory": 30,
         "base_price": 2.50,
         "base_markdown_demand": 6.0,
