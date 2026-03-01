@@ -1039,6 +1039,161 @@ def plot_portfolio_dashboard(ok_results, save_dir):
     print(f"  Saved: {path}")
 
 
+def plot_three_way_comparison(ok_results, save_dir):
+    """6-panel comparison of DQN Plain vs DQN Shaped vs Best Baseline."""
+    from collections import Counter
+
+    by_cat = {}
+    for r in ok_results:
+        by_cat.setdefault(r["category"], []).append(r)
+    cats = sorted(by_cat.keys())
+    x_pos = np.arange(len(cats))
+    width = 0.25
+
+    # Compute per-category means
+    plain_reward = [np.mean([r["plain_reward"] for r in by_cat[c]]) for c in cats]
+    shaped_reward = [np.mean([r["shaped_reward"] for r in by_cat[c]]) for c in cats]
+    bl_reward = [np.mean([r["best_baseline_reward"] for r in by_cat[c]]) for c in cats]
+
+    plain_rev = [np.mean([r["plain_revenue"] for r in by_cat[c]]) for c in cats]
+    shaped_rev = [np.mean([r["shaped_revenue"] for r in by_cat[c]]) for c in cats]
+    bl_rev = [np.mean([r["best_baseline_revenue"] for r in by_cat[c]]) for c in cats]
+
+    plain_waste = [np.mean([r["plain_waste"] for r in by_cat[c]]) * 100 for c in cats]
+    shaped_waste = [np.mean([r["shaped_waste"] for r in by_cat[c]]) * 100 for c in cats]
+    bl_waste = [np.mean([r["best_baseline_waste"] for r in by_cat[c]]) * 100 for c in cats]
+
+    C_PLAIN = "#2E86C1"
+    C_SHAPED = "#1B4F72"
+    C_BASELINE = "#E67E22"
+
+    fig, axes = plt.subplots(2, 3, figsize=(24, 14))
+    fig.suptitle(
+        f"DQN Plain vs DQN Shaped vs Best Baseline — {len(ok_results)} SKUs",
+        fontsize=18, fontweight="bold", y=0.98,
+    )
+
+    # Panel 1: Mean reward by category
+    ax = axes[0, 0]
+    ax.bar(x_pos - width, plain_reward, width, label="DQN Plain",
+           color=C_PLAIN, alpha=0.85)
+    ax.bar(x_pos, shaped_reward, width, label="DQN Shaped",
+           color=C_SHAPED, alpha=0.85)
+    ax.bar(x_pos + width, bl_reward, width, label="Best Baseline",
+           color=C_BASELINE, alpha=0.85)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(cats, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Mean Reward")
+    ax.set_title("Reward by Category", fontsize=13, fontweight="bold")
+    ax.legend(fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Panel 2: Mean revenue by category
+    ax = axes[0, 1]
+    ax.bar(x_pos - width, plain_rev, width, label="DQN Plain",
+           color=C_PLAIN, alpha=0.85)
+    ax.bar(x_pos, shaped_rev, width, label="DQN Shaped",
+           color=C_SHAPED, alpha=0.85)
+    ax.bar(x_pos + width, bl_rev, width, label="Best Baseline",
+           color=C_BASELINE, alpha=0.85)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(cats, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Mean Revenue ($)")
+    ax.set_title("Revenue by Category", fontsize=13, fontweight="bold")
+    ax.legend(fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Panel 3: Mean waste by category
+    ax = axes[0, 2]
+    ax.bar(x_pos - width, plain_waste, width, label="DQN Plain",
+           color=C_PLAIN, alpha=0.85)
+    ax.bar(x_pos, shaped_waste, width, label="DQN Shaped",
+           color=C_SHAPED, alpha=0.85)
+    ax.bar(x_pos + width, bl_waste, width, label="Best Baseline",
+           color=C_BASELINE, alpha=0.85)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(cats, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Mean Waste Rate (%)")
+    ax.set_title("Waste Rate by Category", fontsize=13, fontweight="bold")
+    ax.legend(fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Panel 4: Who wins most often (per-SKU best)
+    ax = axes[1, 0]
+    winner_counts = Counter()
+    for r in ok_results:
+        rewards = {
+            "DQN Plain": r["plain_reward"],
+            "DQN Shaped": r["shaped_reward"],
+            "Best Baseline": r["best_baseline_reward"],
+        }
+        winner = max(rewards, key=rewards.get)
+        winner_counts[winner] += 1
+
+    labels = ["DQN Plain", "DQN Shaped", "Best Baseline"]
+    counts = [winner_counts.get(l, 0) for l in labels]
+    pct = [c / len(ok_results) * 100 for c in counts]
+    bar_colors = [C_PLAIN, C_SHAPED, C_BASELINE]
+    bars = ax.bar(labels, counts, color=bar_colors, edgecolor="white", alpha=0.85)
+    for bar, c, p in zip(bars, counts, pct):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                f"{c} ({p:.0f}%)", ha="center", fontsize=11, fontweight="bold")
+    ax.set_ylabel("# SKUs Where This Policy Is Best")
+    ax.set_title("Per-SKU Winner Distribution", fontsize=13, fontweight="bold")
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Panel 5: Per-SKU reward (sorted, all 3 overlaid)
+    ax = axes[1, 1]
+    sorted_results = sorted(ok_results,
+                            key=lambda r: r["shaped_reward"] - r["best_baseline_reward"])
+    xs = np.arange(len(sorted_results))
+    ax.scatter(xs, [r["plain_reward"] for r in sorted_results],
+               c=C_PLAIN, s=12, alpha=0.6, label="DQN Plain", zorder=2)
+    ax.scatter(xs, [r["shaped_reward"] for r in sorted_results],
+               c=C_SHAPED, s=12, alpha=0.6, label="DQN Shaped", zorder=3)
+    ax.scatter(xs, [r["best_baseline_reward"] for r in sorted_results],
+               c=C_BASELINE, s=12, alpha=0.6, marker="x", label="Best Baseline", zorder=2)
+    ax.set_xlabel(f"SKUs (sorted by shaped - baseline gap)")
+    ax.set_ylabel("Reward")
+    ax.set_title("All SKU Rewards (3-way)", fontsize=13, fontweight="bold")
+    ax.legend(fontsize=9, loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    # Panel 6: Pairwise win rates
+    ax = axes[1, 2]
+    shaped_beats_plain = sum(
+        1 for r in ok_results if r["shaped_reward"] > r["plain_reward"]
+    )
+    shaped_beats_bl = sum(1 for r in ok_results if r["beats_baseline"])
+    plain_beats_bl = sum(
+        1 for r in ok_results if r["plain_reward"] > r["best_baseline_reward"]
+    )
+    n = len(ok_results)
+
+    matchups = ["Shaped > Plain", "Shaped > Baseline", "Plain > Baseline"]
+    rates = [shaped_beats_plain / n * 100, shaped_beats_bl / n * 100,
+             plain_beats_bl / n * 100]
+    bar_colors_pw = [C_SHAPED, C_SHAPED, C_PLAIN]
+    bars = ax.barh(matchups, rates, color=bar_colors_pw, edgecolor="white",
+                   alpha=0.85, height=0.5)
+    for bar, r_val in zip(bars, rates):
+        count = int(r_val * n / 100)
+        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
+                f"{r_val:.0f}% ({count}/{n})", va="center", fontsize=11,
+                fontweight="bold")
+    ax.set_xlim(0, 110)
+    ax.set_xlabel("Win Rate (%)")
+    ax.set_title("Pairwise Win Rates", fontsize=13, fontweight="bold")
+    ax.axvline(50, color="gray", linestyle="--", alpha=0.4)
+    ax.grid(True, axis="x", alpha=0.3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    path = os.path.join(save_dir, "portfolio_three_way_comparison.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
 def generate_portfolio_plots(portfolio_path, save_dir=None):
     """Generate all portfolio-level visualizations from portfolio_results.json.
 
@@ -1063,6 +1218,7 @@ def generate_portfolio_plots(portfolio_path, save_dir=None):
     print(f"  {'='*60}")
 
     plot_portfolio_dashboard(ok_results, save_dir)
+    plot_three_way_comparison(ok_results, save_dir)
     plot_dqn_vs_baseline_scatter(ok_results, save_dir)
     plot_category_win_rates(ok_results, save_dir)
     plot_reward_gap_distribution(ok_results, save_dir)
@@ -1071,7 +1227,7 @@ def generate_portfolio_plots(portfolio_path, save_dir=None):
     plot_revenue_waste_by_category(ok_results, save_dir)
     plot_category_heatmap({"results": ok_results}, save_dir)
 
-    print(f"\n  Done! 8 portfolio plots saved to {save_dir}/")
+    print(f"\n  Done! 9 portfolio plots saved to {save_dir}/")
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────
