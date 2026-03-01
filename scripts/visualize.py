@@ -646,8 +646,10 @@ def generate_all_plots(product="salad_mix", step_hours=4, save_dir="results", us
     else:
         print(f"  [SKIP] No evaluation results found at {eval_path}")
 
-    # Agent-dependent plots: load trained agent
-    agent_path = os.path.join(save_dir, f"best_agent_{suffix}.pt")
+    # Agent-dependent plots: load trained agent (try shaped first, then plain)
+    agent_path = os.path.join(save_dir, f"best_agent_{suffix}_shaped.pt")
+    if not os.path.exists(agent_path):
+        agent_path = os.path.join(save_dir, f"best_agent_{suffix}.pt")
     if os.path.exists(agent_path):
         from fresh_rl.environment import MarkdownProductEnv
         from fresh_rl.dqn_agent import DQNAgent

@@ -52,6 +52,8 @@ def train(
     suffix = f"{product}_{step_hours}h"
     if use_per:
         suffix += "_per"
+    if reward_shaping:
+        suffix += "_shaped"
 
     # Compute waste cost scale: normalize relative to revenue scale
     revenue_scale = env.base_price * env.initial_inventory
