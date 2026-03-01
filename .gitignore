@@ -3,9 +3,8 @@ __pycache__/
 *.pyo
 .env
 *.pkl
-results/*.pkl
-results/*.json
-results/*.png
+results/
+.claude/
 .venv/
 venv/
 *.egg-info/
