@@ -32,8 +32,6 @@ def train(
     prefill_baselines: dict = None,
     warmup_steps: int = 0,
     warmup_epsilon: float = None,
-    double_dqn: bool = True,
-    soft_target_tau: float = 0.005,
     shaping_ratio: float = 0.2,
     env_overrides: dict = None,
     epsilon_decay: float = None,
@@ -76,8 +74,7 @@ def train(
     print(f"  Episodes:          {n_episodes}")
     print(f"  Reward shaping:    {reward_shaping}" +
           (f" (ratio={shaping_ratio}, scale={waste_cost_scale:.1f})" if reward_shaping else ""))
-    print(f"  Double DQN:        {double_dqn}")
-    print(f"  Soft target tau:   {soft_target_tau}")
+    print(f"  Epsilon decay:     {epsilon_decay}")
     print(f"  PER:               {use_per}")
     if prefill:
         print(f"  Pre-fill:          {prefill_episodes} episodes")
@@ -99,13 +96,10 @@ def train(
         epsilon_decay=epsilon_decay,
         buffer_size=10000,
         batch_size=32,
-        target_update_freq=50,
         reward_shaping=reward_shaping,
         waste_cost_scale=waste_cost_scale,
         seed=seed,
         use_per=use_per,
-        double_dqn=double_dqn,
-        soft_target_tau=soft_target_tau,
     )
 
     # Pre-fill phase: load historical data into replay buffer
@@ -216,7 +210,7 @@ def train(
 
         if total_reward > best_reward:
             best_reward = total_reward
-            agent.save(os.path.join(save_dir, f"best_agent_{suffix}.pkl"))
+            agent.save(os.path.join(save_dir, f"best_agent_{suffix}.pt"))
 
         # Periodic greedy evaluation + logging
         if (ep + 1) % eval_freq == 0 or ep == 0:
@@ -238,7 +232,7 @@ def train(
             )
 
     # Save final agent
-    agent.save(os.path.join(save_dir, f"final_agent_{suffix}.pkl"))
+    agent.save(os.path.join(save_dir, f"final_agent_{suffix}.pt"))
 
     # Save training history
     history = {
@@ -250,16 +244,16 @@ def train(
         "reward_shaping": reward_shaping,
         "shaping_ratio": shaping_ratio,
         "use_per": use_per,
-        "double_dqn": double_dqn,
-        "soft_target_tau": soft_target_tau,
         "prefill": prefill,
         "prefill_episodes": prefill_episodes if prefill else 0,
         "warmup_steps": warmup_steps,
+        "epsilon_decay": epsilon_decay,
         "seed": seed,
         "episode_rewards": episode_rewards,
         "episode_revenues": episode_revenues,
         "episode_wastes": episode_wastes,
         "episode_clearance": episode_clearance,
+        "losses": agent.losses[-2000:],
         "greedy_eval": [
             {"episode": e, "reward": r, "revenue": rev, "waste": w, "clearance": c}
             for e, r, rev, w, c in greedy_eval_episodes
@@ -291,12 +285,6 @@ if __name__ == "__main__":
     parser.add_argument("--reward-shaping", action="store_true", help="Enable reward shaping")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=str, default="results")
-
-    # DQN variants
-    parser.add_argument("--no-double-dqn", action="store_true",
-                        help="Disable Double DQN (enabled by default)")
-    parser.add_argument("--soft-target-tau", type=float, default=0.005,
-                        help="Soft target update rate (0 = hard updates only)")
 
     # PER and pre-fill options
     parser.add_argument("--per", action="store_true", help="Enable Prioritized Experience Replay")
@@ -330,7 +318,5 @@ if __name__ == "__main__":
         prefill_episodes=args.prefill_episodes,
         warmup_steps=args.warmup_steps,
         warmup_epsilon=args.warmup_epsilon,
-        double_dqn=not args.no_double_dqn,
-        soft_target_tau=args.soft_target_tau if args.soft_target_tau > 0 else None,
         shaping_ratio=args.shaping_ratio,
     )

@@ -22,15 +22,15 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 ### Key Features
 
 - **Product catalog**: 110 SKUs across 7 categories with realistic economics (seeded, reproducible)
-- **Custom Gymnasium environment** with configurable product profiles and catalog fallback
+- **Custom Gymnasium environment** with configurable product profiles via product catalog
 - **Progressive discount constraint** enforced via action masking in both agent and baselines
-- **Double DQN** with soft target updates (tau=0.005) — pure NumPy, no deep learning frameworks
+- **Double DQN** with soft target updates (tau=0.005) — PyTorch-based
 - **Prioritized Experience Replay** (SumTree-based) for sample-efficient learning
 - **Historical data pre-filling** from baseline policies to bootstrap the replay buffer
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
 - **7 baseline policies** for rigorous comparison
 - **Portfolio runner** for cross-category validation with parallel workers
-- **Visualization suite** for training curves, policy comparison, and portfolio summary
+- **Visualization suite**: training curves, policy comparison, policy heatmaps, episode walkthroughs, revenue-waste Pareto, training dashboard, category heatmap, and discount progression
 
 ## Project Structure
 
@@ -39,7 +39,7 @@ fresh-rl-poc/
 ├── fresh_rl/
 │   ├── __init__.py
 │   ├── environment.py          # MarkdownChannelEnv + MarkdownProductEnv
-│   ├── dqn_agent.py            # Double DQN with action masking (pure NumPy)
+│   ├── dqn_agent.py            # Double DQN with action masking (PyTorch)
 │   ├── baselines.py            # 7 rule-based markdown policies
 │   ├── product_catalog.py      # 110 SKUs across 7 categories
 │   ├── prioritized_replay.py   # PER with SumTree
@@ -48,13 +48,12 @@ fresh-rl-poc/
 ├── scripts/
 │   ├── train.py                # Training script (single product)
 │   ├── evaluate.py             # Evaluation: DQN vs baselines
-│   ├── visualize.py            # Generate comparison plots
-│   ├── run_all.py              # Full pipeline: train → eval → viz
-│   ├── run_portfolio.py        # Portfolio runner (all SKUs, parallel)
-│   └── ab_test.py              # A/B test: 4h vs 2h step configs
+│   ├── visualize.py            # Visualization suite (10 plot types)
+│   └── run_portfolio.py        # Portfolio runner (all SKUs, parallel)
 ├── results/                    # Output directory (gitignored)
 ├── requirements.txt
 ├── EXPERIMENTS.md              # Iteration history and learnings
+├── ARCHITECTURE.md             # Technical architecture documentation
 └── README.md
 ```
 
@@ -67,12 +66,12 @@ pip install -r requirements.txt
 # List all 110 available products
 python scripts/train.py --list-products
 
-# Run the complete pipeline for a single product
-python scripts/run_all.py --product salad_mix --episodes 1000 --per --prefill --warmup-steps 1000
-
 # Train a single product with all features
 python scripts/train.py --product salmon_fillet --episodes 1500 --step-hours 2 \
     --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2
+
+# Generate visualizations for a trained product
+python scripts/visualize.py --product salmon_fillet --step-hours 2 --per
 
 # Run portfolio across all 110 SKUs
 python scripts/run_portfolio.py --episodes 1500 --eval-episodes 100 \
@@ -83,8 +82,8 @@ python scripts/run_portfolio.py --episodes 1500 --eval-episodes 100 \
     --step-hours 2 --per --prefill --warmup-steps 1000 --workers 4 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999
 
-# A/B test: 4h vs 2h step configurations
-python scripts/ab_test.py --product fresh_chicken --episodes 500
+# Run a single product via portfolio runner
+python scripts/run_portfolio.py --products salmon_fillet --episodes 1500
 ```
 
 ## Product Catalog

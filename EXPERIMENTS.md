@@ -171,6 +171,66 @@ Interesting: Linear Progressive and Fixed 40% generate more raw revenue ($116.5 
 
 ---
 
+## Iteration 6: PyTorch Migration, Code Cleanup, Visualization Suite
+
+**Commit**: (v0.5.0)
+
+**Goal**: Reduce code via open-source packages, strip backward compatibility, add comprehensive visualizations.
+
+**Changes**:
+
+### PyTorch migration (`dqn_agent.py`)
+
+Replaced the 106-line hand-rolled `NumpyMLP` (manual forward/backward/Adam/He init) with a PyTorch `nn.Sequential` model:
+
+| Before (NumPy) | After (PyTorch) |
+|----------------|-----------------|
+| Manual He initialization | `nn.init.kaiming_normal_()` |
+| Manual forward pass with cached activations | `nn.Sequential` forward pass |
+| Manual backpropagation (chain rule, per-layer) | `loss.backward()` |
+| Manual Adam optimizer state (`m`, `v`, `t`) | `torch.optim.Adam` |
+| Manual gradient clipping (`np.clip`) | `clip_grad_norm_(params, 1.0)` |
+| `pickle.dump` / `pickle.load` | `torch.save` / `torch.load` |
+
+The algorithm is identical (Double DQN + PER + action masking + reward shaping). Exact numbers differ due to PyTorch vs NumPy floating point paths, but the same quality of results is preserved.
+
+Net reduction: ~383 → ~220 lines in `dqn_agent.py`.
+
+### Backward compatibility removal
+
+- **Removed vanilla DQN code path** (`if not self.double_dqn` branch) — Double DQN is always on
+- **Removed hard target update path** (`elif self.train_step % self.target_update_freq == 0`) — soft updates (tau=0.005) always on
+- **Removed `--no-double-dqn` and `--soft-target-tau` CLI flags** from `train.py` and `run_portfolio.py`
+- **Removed `PRODUCT_PROFILES` dict** from `environment.py` — all products resolve via `product_catalog.get_profile()`
+- **Deleted `scripts/ab_test.py`** (217 lines) — 4h vs 2h decision settled at Iteration 5
+- **Deleted `scripts/run_all.py`** (132 lines) — `run_portfolio.py --products <name>` does the same
+
+### Visualization suite expansion (`visualize.py`)
+
+Added 6 new plot types beyond the existing 3 (training curves, comparison bars, action distributions):
+
+| Plot | Purpose |
+|------|---------|
+| `plot_policy_heatmap` | 2D grid of learned discount decisions across hours × inventory |
+| `plot_episode_walkthrough` | 4-panel trace of a single greedy episode |
+| `plot_revenue_waste_pareto` | Revenue vs waste tradeoff scatter for all policies |
+| `plot_training_dashboard` | 3-panel: loss curve, epsilon decay, greedy eval metrics |
+| `plot_category_heatmap` | Category × metrics heatmap from portfolio results |
+| `plot_action_progression` | Discount escalation over 50 episodes with mean/std band |
+
+Net expansion: ~287 → ~650 lines in `visualize.py`.
+
+### Other changes
+
+- Added `torch>=2.0.0` and `seaborn>=0.12.0` to `requirements.txt`
+- Added `losses` and `epsilon_decay` fields to training history JSON
+- Agent checkpoints saved as `.pt` (PyTorch) instead of `.pkl` (pickle)
+- Version bumped to 0.5.0
+
+**Learning**: PyTorch eliminates ~160 lines of manual neural network code while keeping the RL algorithm identical. The main risk was subtle floating-point differences, but the overall quality of results is preserved. Removing backward compat makes the codebase easier to reason about — there's now only one path through every decision point.
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps

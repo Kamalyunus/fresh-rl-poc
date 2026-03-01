@@ -263,57 +263,14 @@ class MarkdownProductEnv(MarkdownChannelEnv):
     Extended environment with configurable product profiles for the
     markdown channel. Each product represents a different perishability
     category with realistic markdown-specific parameters.
+
+    Profiles are resolved from the product catalog (110 SKUs across
+    7 categories + legacy). See fresh_rl.product_catalog for details.
     """
 
-    PRODUCT_PROFILES = {
-        "salad_mix": {
-            "markdown_window_hours": 24,
-            "initial_inventory": 25,
-            "base_price": 3.50,
-            "base_markdown_demand": 5.0,
-            "price_elasticity": 3.5,
-            "cost_per_unit": 1.20,
-        },
-        "fresh_chicken": {
-            "markdown_window_hours": 24,
-            "initial_inventory": 15,
-            "base_price": 8.00,
-            "base_markdown_demand": 3.0,
-            "price_elasticity": 2.8,
-            "cost_per_unit": 4.00,
-        },
-        "yogurt": {
-            "markdown_window_hours": 48,
-            "initial_inventory": 30,
-            "base_price": 2.50,
-            "base_markdown_demand": 6.0,
-            "price_elasticity": 3.0,
-            "cost_per_unit": 0.80,
-        },
-        "bakery_bread": {
-            "markdown_window_hours": 24,
-            "initial_inventory": 18,
-            "base_price": 4.00,
-            "base_markdown_demand": 4.5,
-            "price_elasticity": 4.0,
-            "cost_per_unit": 1.50,
-        },
-        "sushi": {
-            "markdown_window_hours": 12,
-            "initial_inventory": 10,
-            "base_price": 10.00,
-            "base_markdown_demand": 2.5,
-            "price_elasticity": 2.5,
-            "cost_per_unit": 5.00,
-        },
-    }
-
     def __init__(self, product_name: str = "salad_mix", **kwargs):
-        if product_name in self.PRODUCT_PROFILES:
-            profile = self.PRODUCT_PROFILES[product_name].copy()
-        else:
-            from fresh_rl.product_catalog import get_profile
-            profile = get_profile(product_name)
+        from fresh_rl.product_catalog import get_profile
+        profile = get_profile(product_name)
         profile.update(kwargs)  # allow overrides
         super().__init__(**profile)
         self.product_name = product_name

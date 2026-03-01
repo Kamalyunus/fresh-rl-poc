@@ -9,7 +9,7 @@ Detailed technical documentation of the reinforcement learning system for perish
 1. [System Architecture](#system-architecture)
 2. [MDP Formulation](#mdp-formulation)
 3. [Episode Lifecycle](#episode-lifecycle)
-4. [Neural Network (Pure NumPy MLP)](#neural-network-pure-numpy-mlp)
+4. [Neural Network (PyTorch MLP)](#neural-network-pytorch-mlp)
 5. [Deep Q-Network (DQN)](#deep-q-network-dqn)
 6. [Double DQN](#double-dqn)
 7. [Target Network and Soft Updates](#target-network-and-soft-updates)
@@ -106,7 +106,8 @@ Environment                Agent                     Replay Buffer
     |                        |--- compute TD targets ---->|
     |                        |    (Double DQN)            |
     |                        |                            |
-    |                        |--- backprop + Adam ------->|
+    |                        |--- loss.backward() ------->|
+    |                        |    + optimizer.step()      |
     |                        |                            |
     |                        |--- update priorities ----->|
     |                        |    (PER only)              |
@@ -296,23 +297,33 @@ Step 11 (final, hour 22-24):
 
 ---
 
-## Neural Network (Pure NumPy MLP)
+## Neural Network (PyTorch MLP)
 
-The Q-network is a 2-layer multilayer perceptron implemented entirely in NumPy — no PyTorch, TensorFlow, or JAX.
+The Q-network is a 2-layer multilayer perceptron built with PyTorch `nn.Sequential`.
 
 ### Architecture
+
+```python
+nn.Sequential(
+    nn.Linear(6, 64),       # Layer 1
+    nn.ReLU(),
+    nn.Linear(64, 64),      # Layer 2
+    nn.ReLU(),
+    nn.Linear(64, n_actions) # Output
+)
+```
 
 ```
 Input (6-dim state)
     |
     v
-[Linear: 6 -> 64] -> [ReLU]     (Layer 1: W1, b1)
+[Linear: 6 -> 64] -> [ReLU]     (Layer 1)
     |
     v
-[Linear: 64 -> 64] -> [ReLU]    (Layer 2: W2, b2)
+[Linear: 64 -> 64] -> [ReLU]    (Layer 2)
     |
     v
-[Linear: 64 -> n_actions]       (Output: W3, b3)
+[Linear: 64 -> n_actions]       (Output)
     |
     v
 Q-values (6-dim for 4h, 11-dim for 2h)
@@ -322,77 +333,46 @@ Total parameters:
 - 4h mode: `6*64 + 64 + 64*64 + 64 + 64*6 + 6 = 4,870`
 - 2h mode: `6*64 + 64 + 64*64 + 64 + 64*11 + 11 = 5,195`
 
-### He Initialization
+### Kaiming Initialization
 
-Weights are initialized from `N(0, sqrt(2/fan_in))`:
-
-```python
-W1 = randn(6, 64) * sqrt(2/6)      # ~N(0, 0.577)
-W2 = randn(64, 64) * sqrt(2/64)    # ~N(0, 0.177)
-W3 = randn(64, n_act) * sqrt(2/64) # ~N(0, 0.177)
-```
-
-He initialization is designed for ReLU networks — it accounts for the fact that ReLU zeroes out ~half of activations, keeping variance stable through depth. Without it, deep networks suffer from vanishing/exploding activations.
-
-### Forward Pass
+All Linear layers use Kaiming (He) normal initialization via `nn.init.kaiming_normal_()` with biases zeroed:
 
 ```python
-z1 = x @ W1 + b1        # pre-activation layer 1
-a1 = max(0, z1)          # ReLU activation
-z2 = a1 @ W2 + b2       # pre-activation layer 2
-a2 = max(0, z2)          # ReLU activation
-q  = a2 @ W3 + b3       # Q-values (linear output)
+for layer in net:
+    if isinstance(layer, nn.Linear):
+        nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
+        nn.init.zeros_(layer.bias)
 ```
 
-The forward pass caches all intermediate values `(x, z1, a1, z2, a2)` for use in backpropagation.
+Kaiming initialization is designed for ReLU networks — it accounts for the fact that ReLU zeroes out ~half of activations, keeping variance stable through depth. Without it, deep networks suffer from vanishing/exploding activations.
 
-### Backpropagation
+### Training Step
 
-The loss is masked MSE — only the Q-value for the action actually taken is updated:
+The loss is MSE over the Q-values for taken actions, optionally weighted by importance-sampling weights (PER):
 
 ```
 L = (1/B) * sum_i [ w_i * (Q(s_i, a_i) - target_i)^2 ]
 ```
 
-where `w_i` is the importance-sampling weight (1.0 for uniform replay, or IS weight for PER).
-
-Gradient computation (chain rule through the network):
+PyTorch handles backpropagation and optimization automatically:
 
 ```python
-# Output gradient: only for taken action
-dq[i, a_i] = 2 * w_i * (Q(s_i, a_i) - target_i) / batch_size
-
-# Layer 3: dW3 = a2^T @ dq, db3 = sum(dq)
-# ReLU 2:  da2 = da2 * (z2 > 0)      # derivative of ReLU is 0 or 1
-# Layer 2: dW2 = a1^T @ da2, db2 = sum(da2)
-# ReLU 1:  da1 = da1 * (z1 > 0)
-# Layer 1: dW1 = x^T @ da1, db1 = sum(da1)
+loss.backward()                                      # autograd computes all gradients
+nn.utils.clip_grad_norm_(q_network.parameters(), 1.0) # gradient clipping (max norm)
+optimizer.step()                                      # Adam update
 ```
 
 ### Gradient Clipping
 
-All gradients are element-wise clipped to `[-1, 1]` before the optimizer step:
-
-```python
-np.clip(grad, -1.0, 1.0, out=grad)
-```
-
-This prevents catastrophic gradient explosions from outlier TD errors, which are common in RL due to non-stationary targets and high-variance rewards.
+Gradient norms are clipped to a max of 1.0 via `clip_grad_norm_()`. This prevents catastrophic gradient explosions from outlier TD errors, which are common in RL due to non-stationary targets and high-variance rewards.
 
 ### Adam Optimizer
 
-The Adam optimizer maintains per-parameter first moment (mean) and second moment (uncentered variance) estimates:
+`torch.optim.Adam` with `lr=5e-4`. Adam adapts the learning rate per-parameter — parameters with sparse gradients get larger effective updates.
 
-```python
-# Hyperparameters: beta1=0.9, beta2=0.999, epsilon=1e-8
-m = 0.9 * m + 0.1 * grad           # first moment estimate
-v = 0.999 * v + 0.001 * grad^2     # second moment estimate
-m_hat = m / (1 - 0.9^t)            # bias correction
-v_hat = v / (1 - 0.999^t)          # bias correction
-param -= lr * m_hat / (sqrt(v_hat) + 1e-8)
-```
+### Model Persistence
 
-Adam adapts the learning rate per-parameter — parameters with sparse gradients get larger effective updates. The bias correction terms compensate for zero-initialization of `m` and `v` in early steps.
+Agent state is saved and loaded via `torch.save()` / `torch.load()` as `.pt` files containing the Q-network, target network, and optimizer state dicts.
 
 ---
 
@@ -411,16 +391,17 @@ target = r + gamma * max_a' Q_target(s', a')   (if not terminal)
 target = r                                      (if terminal)
 ```
 
-### Training Step (Vanilla DQN)
+### Training Step
 
 ```
 1. Sample mini-batch {(s, a, r, s', done)} from replay buffer
-2. Compute targets:
-     y = r + gamma * max_a' Q_target(s', a') * (1 - done)
+2. Compute Double DQN targets:
+     a* = argmax_a' Q_online(s', a')   (online selects, with mask)
+     y = r + gamma * Q_target(s', a*) * (1 - done)
 3. Forward pass: Q_theta(s) for all actions
 4. Loss: MSE between Q_theta(s, a) and y for taken actions only
-5. Backward pass: compute gradients, update Q_theta
-6. Periodically copy Q_theta -> Q_target
+5. loss.backward() + clip_grad_norm_ + optimizer.step()
+6. Soft update target network (tau=0.005)
 ```
 
 ### Why Experience Replay?
@@ -472,45 +453,29 @@ Since the online network selects and the target network evaluates, the noise in 
 ### Implementation
 
 ```python
-# Double DQN target computation
-online_next_q = Q_online.predict(next_states)    # shape: (batch, n_actions)
-masked_online = online_next_q.copy()
-masked_online[~next_action_masks] = -inf          # respect progressive constraint
-best_actions = argmax(masked_online, axis=1)       # online selects
+with torch.no_grad():
+    # Online network SELECTS the best action (with mask)
+    online_next_q = q_network(next_states_t)
+    masked_online = online_next_q.clone()
+    masked_online[~next_masks_t] = -float("inf")
+    best_actions = masked_online.argmax(dim=1)
 
-target_next_q = Q_target.predict(next_states)     # target evaluates
-max_next_q = target_next_q[range(B), best_actions] # Q_target at online's choice
+    # Target network EVALUATES that action
+    target_next_q = target_network(next_states_t)
+    max_next_q = target_next_q.gather(1, best_actions.unsqueeze(1)).squeeze(1)
 
-targets = rewards + gamma * max_next_q * (1 - dones)
+    targets = rewards_t + gamma * max_next_q * (1 - dones_t)
 ```
 
-Compare with vanilla DQN where the target network does both:
-
-```python
-# Vanilla DQN (overestimates)
-next_q = Q_target.predict(next_states)
-masked_next_q = next_q.copy()
-masked_next_q[~next_action_masks] = -inf
-max_next_q = max(masked_next_q, axis=1)  # target selects AND evaluates
-```
+By decoupling selection (online) from evaluation (target), the noise in one doesn't amplify the noise in the other, dramatically reducing Q-value overestimation.
 
 ---
 
 ## Target Network and Soft Updates
 
-### Hard Updates (Periodic Copy)
-
-The original DQN copies the entire online network to the target network every `C` steps:
-
-```
-every C steps: Q_target = Q_online
-```
-
-This creates discontinuities — the target changes abruptly every C steps, then stays frozen. Training dynamics oscillate between "stale targets" and "target jumps."
-
 ### Soft Updates (Polyak Averaging)
 
-Instead of periodic hard copies, soft updates blend the networks continuously:
+The target network is updated via Polyak averaging every training step:
 
 ```python
 # Every training step:
@@ -519,8 +484,8 @@ Q_target = tau * Q_online + (1 - tau) * Q_target
 
 With `tau = 0.005`, the target network moves toward the online network by 0.5% each step. This provides:
 
-- **Smooth target evolution**: no discontinuities
-- **Recency**: the target always reflects recent learning (unlike stale hard copies)
+- **Smooth target evolution**: no discontinuities (unlike periodic hard copies)
+- **Recency**: the target always reflects recent learning
 - **Stability**: the target can't change faster than 0.5% per step
 
 The effective "half-life" of old target weights is `ln(0.5) / ln(1 - tau) = ~138 steps` — after ~138 gradient updates, old target weights have decayed to half their influence.
@@ -528,10 +493,9 @@ The effective "half-life" of old target weights is `ln(0.5) / ln(1 - tau) = ~138
 ### Implementation
 
 ```python
-def soft_update_from(self, other, tau):
-    for i in range(len(self.params)):
-        self.params[i] *= (1.0 - tau)           # decay old target
-        self.params[i] += tau * other.params[i]  # blend in online
+with torch.no_grad():
+    for tp, p in zip(target_network.parameters(), q_network.parameters()):
+        tp.data.mul_(1.0 - tau).add_(tau * p.data)
 ```
 
 ---
@@ -1054,26 +1018,15 @@ Lower bound. Useful for measuring how much better any structured policy performs
 
 ## Training Pipeline
 
-### Full Pipeline (scripts/run_all.py)
-
-```
-1. Train DQN agent (scripts/train.py)
-     -> Saves agent weights + training history JSON
-2. Evaluate agent vs baselines (scripts/evaluate.py)
-     -> Greedy rollouts, per-policy metrics, comparison table
-3. Generate visualizations (scripts/visualize.py)
-     -> Training curves, policy comparison bar charts
-```
-
 ### Single Product Training (scripts/train.py)
 
 ```
 Input: product name, hyperparameters, flags
-Output: trained agent (.pkl), training history (.json)
+Output: trained agent (.pt), training history (.json)
 
 Pipeline:
-  1. Create environment from product profile (or catalog fallback)
-  2. Create DQN agent with configured hyperparameters
+  1. Create environment from product catalog profile
+  2. Create DQN agent (PyTorch) with configured hyperparameters
   3. [Optional] Pre-fill buffer with 200 episodes of baseline data
   4. [Optional] Run 1000 warmup gradient steps on buffered data
   5. Online training loop (500-1500 episodes):
@@ -1084,7 +1037,15 @@ Pipeline:
        e. Decay epsilon
        f. Every 50 episodes: greedy evaluation (20 episodes, epsilon=0)
        g. Save best agent checkpoint
-  6. Save final agent and training history
+  6. Save final agent and training history (including losses + epsilon_decay)
+
+Evaluation (scripts/evaluate.py):
+  -> Greedy rollouts, per-policy metrics, comparison table
+
+Visualization (scripts/visualize.py):
+  -> Training curves, training dashboard, policy comparison bars,
+     action distributions, policy heatmap, episode walkthrough,
+     revenue-waste Pareto, discount progression, category heatmap
 ```
 
 ### Key Hyperparameters

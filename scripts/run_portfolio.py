@@ -45,8 +45,6 @@ def _run_single_product(
     prefill: bool,
     prefill_episodes: int,
     warmup_steps: int,
-    double_dqn: bool,
-    soft_target_tau: float,
     demand_mult: float = 1.0,
     inventory_mult: float = 1.0,
     epsilon_decay: float = None,
@@ -80,8 +78,6 @@ def _run_single_product(
         prefill=prefill,
         prefill_episodes=prefill_episodes,
         warmup_steps=warmup_steps,
-        double_dqn=double_dqn,
-        soft_target_tau=soft_target_tau if soft_target_tau > 0 else None,
         shaping_ratio=shaping_ratio,
         env_overrides=env_overrides if env_overrides else None,
         epsilon_decay=epsilon_decay,
@@ -413,8 +409,6 @@ def main():
     parser.add_argument("--prefill", action="store_true")
     parser.add_argument("--prefill-episodes", type=int, default=200)
     parser.add_argument("--warmup-steps", type=int, default=0)
-    parser.add_argument("--no-double-dqn", action="store_true")
-    parser.add_argument("--soft-target-tau", type=float, default=0.005)
 
     # Environment difficulty multipliers
     parser.add_argument("--demand-mult", type=float, default=1.0,
@@ -482,8 +476,6 @@ def main():
         prefill=args.prefill,
         prefill_episodes=args.prefill_episodes,
         warmup_steps=args.warmup_steps,
-        double_dqn=not args.no_double_dqn,
-        soft_target_tau=args.soft_target_tau,
         demand_mult=args.demand_mult,
         inventory_mult=args.inventory_mult,
         epsilon_decay=args.epsilon_decay,

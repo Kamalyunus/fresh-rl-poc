@@ -1,20 +1,20 @@
 """
 Deep Q-Network (DQN) agent with action masking for progressive discounting.
 
-This is a lightweight, educational implementation suitable for the POC.
-No PyTorch/TensorFlow dependency — just NumPy neural networks.
+PyTorch-based Double DQN with soft target updates.
 
 Features:
-- 2-layer MLP Q-network with ReLU activations
+- 2-layer MLP Q-network (PyTorch nn.Module)
 - Experience replay buffer with action mask support
 - Epsilon-greedy exploration over valid actions only
-- Target network with periodic sync
+- Double DQN with Polyak-averaged target network
 - Optional potential-based reward shaping (urgency-aware)
 """
 
 import numpy as np
+import torch
+import torch.nn as nn
 from collections import deque
-import pickle
 
 
 class ReplayBuffer:
@@ -44,121 +44,14 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-class NumpyMLP:
-    """
-    Simple 2-layer MLP implemented in pure NumPy.
-
-    Architecture: input -> hidden1 (ReLU) -> hidden2 (ReLU) -> output
-    Uses He initialization and Adam optimizer.
-    """
-
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, lr: float = 1e-3):
-        self.lr = lr
-
-        # He initialization
-        self.W1 = np.random.randn(input_dim, hidden_dim) * np.sqrt(2.0 / input_dim)
-        self.b1 = np.zeros(hidden_dim)
-        self.W2 = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(2.0 / hidden_dim)
-        self.b2 = np.zeros(hidden_dim)
-        self.W3 = np.random.randn(hidden_dim, output_dim) * np.sqrt(2.0 / hidden_dim)
-        self.b3 = np.zeros(output_dim)
-
-        # Adam optimizer state
-        self.params = [self.W1, self.b1, self.W2, self.b2, self.W3, self.b3]
-        self.m = [np.zeros_like(p) for p in self.params]
-        self.v = [np.zeros_like(p) for p in self.params]
-        self.t = 0
-
-    def forward(self, x):
-        """Forward pass returning Q-values and cached activations for backprop."""
-        z1 = x @ self.W1 + self.b1
-        a1 = np.maximum(0, z1)  # ReLU
-        z2 = a1 @ self.W2 + self.b2
-        a2 = np.maximum(0, z2)  # ReLU
-        q_values = a2 @ self.W3 + self.b3
-        cache = (x, z1, a1, z2, a2)
-        return q_values, cache
-
-    def predict(self, x):
-        """Forward pass without caching (for inference)."""
-        q, _ = self.forward(x)
-        return q
-
-    def backward(self, cache, q_values, targets, actions, is_weights=None):
-        """
-        Backpropagation for DQN loss.
-        Only updates Q-values for taken actions (masked MSE loss).
-
-        When is_weights is provided (PER), each sample's gradient is scaled
-        by its importance-sampling weight to correct for non-uniform sampling.
-        """
-        x, z1, a1, z2, a2 = cache
-        batch_size = x.shape[0]
-
-        # Compute gradient of loss w.r.t. output (only for taken actions)
-        dq = np.zeros_like(q_values)
-        for i in range(batch_size):
-            weight = is_weights[i] if is_weights is not None else 1.0
-            dq[i, actions[i]] = 2.0 * weight * (q_values[i, actions[i]] - targets[i]) / batch_size
-
-        # Layer 3
-        dW3 = a2.T @ dq
-        db3 = dq.sum(axis=0)
-        da2 = dq @ self.W3.T
-
-        # ReLU 2
-        da2 = da2 * (z2 > 0)
-
-        # Layer 2
-        dW2 = a1.T @ da2
-        db2 = da2.sum(axis=0)
-        da1 = da2 @ self.W2.T
-
-        # ReLU 1
-        da1 = da1 * (z1 > 0)
-
-        # Layer 1
-        dW1 = x.T @ da1
-        db1 = da1.sum(axis=0)
-
-        grads = [dW1, db1, dW2, db2, dW3, db3]
-
-        # Gradient clipping
-        for i in range(len(grads)):
-            np.clip(grads[i], -1.0, 1.0, out=grads[i])
-
-        # Adam update
-        self.t += 1
-        for i, (param, grad) in enumerate(zip(self.params, grads)):
-            self.m[i] = 0.9 * self.m[i] + 0.1 * grad
-            self.v[i] = 0.999 * self.v[i] + 0.001 * grad ** 2
-            m_hat = self.m[i] / (1 - 0.9 ** self.t)
-            v_hat = self.v[i] / (1 - 0.999 ** self.t)
-            param -= self.lr * m_hat / (np.sqrt(v_hat) + 1e-8)
-
-        # Sync references (since we modified in place)
-        self.W1, self.b1, self.W2, self.b2, self.W3, self.b3 = self.params
-
-    def copy_from(self, other):
-        """Copy weights from another network (for target network sync)."""
-        for i in range(len(self.params)):
-            np.copyto(self.params[i], other.params[i])
-
-    def soft_update_from(self, other, tau: float):
-        """Polyak averaging: target = tau * online + (1 - tau) * target."""
-        for i in range(len(self.params)):
-            self.params[i] *= (1.0 - tau)
-            self.params[i] += tau * other.params[i]
-
-
 class DQNAgent:
     """
-    Deep Q-Network agent with action masking for progressive discounting.
+    Double DQN agent with action masking for progressive discounting.
 
     Features:
     - Epsilon-greedy exploration over valid actions only
     - Experience replay with action masks
-    - Target network
+    - Double DQN with Polyak-averaged (soft) target updates
     - Optional potential-based reward shaping (urgency-aware)
     """
 
@@ -174,7 +67,6 @@ class DQNAgent:
         epsilon_decay: float = 0.997,
         buffer_size: int = 10000,
         batch_size: int = 32,
-        target_update_freq: int = 100,
         reward_shaping: bool = False,
         waste_cost_scale: float = None,
         seed: int = None,
@@ -184,8 +76,6 @@ class DQNAgent:
         per_beta_end: float = 1.0,
         per_beta_anneal_steps: int = None,
         per_epsilon: float = 1e-5,
-        double_dqn: bool = True,
-        soft_target_tau: float = None,
     ):
         self.n_actions = n_actions
         self.gamma = gamma
@@ -193,20 +83,24 @@ class DQNAgent:
         self.epsilon_end = epsilon_end
         self.epsilon_decay = epsilon_decay
         self.batch_size = batch_size
-        self.target_update_freq = target_update_freq
         self.reward_shaping = reward_shaping
         self.waste_cost_scale = waste_cost_scale
         self.use_per = use_per
-        self.double_dqn = double_dqn
-        self.soft_target_tau = soft_target_tau
+        self.tau = 0.005
 
         if seed is not None:
             np.random.seed(seed)
+            torch.manual_seed(seed)
+
+        self.device = torch.device("cpu")
 
         # Networks
-        self.q_network = NumpyMLP(state_dim, hidden_dim, n_actions, lr=lr)
-        self.target_network = NumpyMLP(state_dim, hidden_dim, n_actions, lr=lr)
-        self.target_network.copy_from(self.q_network)
+        self.q_network = self._build_network(state_dim, hidden_dim, n_actions)
+        self.target_network = self._build_network(state_dim, hidden_dim, n_actions)
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.target_network.eval()
+
+        self.optimizer = torch.optim.Adam(self.q_network.parameters(), lr=lr)
 
         # Replay buffer
         if use_per:
@@ -228,6 +122,22 @@ class DQNAgent:
         self.losses = []
         self.episode_rewards = []
 
+    @staticmethod
+    def _build_network(state_dim, hidden_dim, n_actions):
+        """Build a 2-layer MLP with Kaiming initialization."""
+        net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, n_actions),
+        )
+        for layer in net:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
+                nn.init.zeros_(layer.bias)
+        return net
+
     def select_action(self, state, action_mask=None, env=None):
         """Epsilon-greedy action selection over valid actions only."""
         if action_mask is None:
@@ -240,9 +150,9 @@ class DQNAgent:
         if np.random.random() < self.epsilon:
             return int(np.random.choice(valid_actions))
         else:
-            state = np.array(state).reshape(1, -1)
-            q_values = self.q_network.predict(state)[0].copy()
-            # Mask invalid actions with -inf
+            with torch.no_grad():
+                state_t = torch.FloatTensor(np.array(state).reshape(1, -1))
+                q_values = self.q_network(state_t).numpy()[0].copy()
             q_values[~action_mask] = -np.inf
             return int(np.argmax(q_values))
 
@@ -302,54 +212,65 @@ class DQNAgent:
             per_indices = None
             is_weights = None
 
-        # Compute target Q-values with action masking
-        if self.double_dqn:
-            # Double DQN: online network selects action, target network evaluates
-            online_next_q = self.q_network.predict(next_states)
-            masked_online = online_next_q.copy()
-            masked_online[~next_action_masks] = -np.inf
-            best_next_actions = np.argmax(masked_online, axis=1)
+        # Convert to tensors
+        states_t = torch.FloatTensor(states)
+        actions_t = torch.LongTensor(actions)
+        rewards_t = torch.FloatTensor(rewards)
+        next_states_t = torch.FloatTensor(next_states)
+        dones_t = torch.FloatTensor(dones)
+        next_masks_t = torch.BoolTensor(next_action_masks)
 
-            target_next_q = self.target_network.predict(next_states)
-            max_next_q = target_next_q[np.arange(len(best_next_actions)), best_next_actions]
+        # Current Q-values for taken actions
+        q_values = self.q_network(states_t)
+        current_q = q_values.gather(1, actions_t.unsqueeze(1)).squeeze(1)
+
+        # Double DQN targets: online network selects, target evaluates
+        with torch.no_grad():
+            online_next_q = self.q_network(next_states_t)
+            # Mask invalid actions
+            masked_online = online_next_q.clone()
+            masked_online[~next_masks_t] = -float("inf")
+            best_next_actions = masked_online.argmax(dim=1)
+
+            target_next_q = self.target_network(next_states_t)
+            max_next_q = target_next_q.gather(1, best_next_actions.unsqueeze(1)).squeeze(1)
+
+            # Guard against all-masked edge case (terminal states)
+            all_masked = ~next_masks_t.any(dim=1)
+            max_next_q[all_masked] = 0.0
+
+            targets = rewards_t + self.gamma * max_next_q * (1 - dones_t)
+
+        # TD errors (for PER priority updates)
+        td_errors = (current_q - targets).detach().numpy()
+
+        # Compute loss
+        if is_weights is not None:
+            is_weights_t = torch.FloatTensor(is_weights)
+            loss = (is_weights_t * (current_q - targets) ** 2).mean()
         else:
-            # Vanilla DQN: target network selects and evaluates
-            next_q = self.target_network.predict(next_states)
-            masked_next_q = next_q.copy()
-            masked_next_q[~next_action_masks] = -np.inf
-            max_next_q = np.max(masked_next_q, axis=1)
+            loss = nn.functional.mse_loss(current_q, targets)
 
-        # Guard against all-masked edge case (terminal states)
-        max_next_q = np.where(np.isinf(max_next_q), 0.0, max_next_q)
+        # Backward pass
+        self.optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+        self.optimizer.step()
 
-        targets = rewards + self.gamma * max_next_q * (1 - dones)
-
-        # Forward pass
-        q_values, cache = self.q_network.forward(states)
-
-        # Compute per-sample TD errors
-        predicted = np.array([q_values[i, actions[i]] for i in range(len(actions))])
-        td_errors = predicted - targets
-        loss = np.mean((td_errors) ** 2)
-        self.losses.append(loss)
-
-        # Backward pass (with IS weights for PER)
-        self.q_network.backward(cache, q_values, targets, actions, is_weights=is_weights)
+        loss_val = loss.item()
+        self.losses.append(loss_val)
 
         # Update priorities in PER buffer
         if self.use_per and per_indices is not None:
             self.replay_buffer.update_priorities(per_indices, td_errors)
 
-        # Update target network
+        # Soft target update (Polyak averaging) every step
         self.train_step += 1
-        if self.soft_target_tau is not None:
-            # Soft update (Polyak averaging) every step
-            self.target_network.soft_update_from(self.q_network, self.soft_target_tau)
-        elif self.train_step % self.target_update_freq == 0:
-            # Hard copy periodically
-            self.target_network.copy_from(self.q_network)
+        with torch.no_grad():
+            for tp, p in zip(self.target_network.parameters(), self.q_network.parameters()):
+                tp.data.mul_(1.0 - self.tau).add_(self.tau * p.data)
 
-        return loss
+        return loss_val
 
     def decay_epsilon(self):
         """Decay exploration rate."""
@@ -358,24 +279,23 @@ class DQNAgent:
     def save(self, path):
         """Save agent to file."""
         data = {
-            "q_params": [p.copy() for p in self.q_network.params],
-            "target_params": [p.copy() for p in self.target_network.params],
+            "q_network": self.q_network.state_dict(),
+            "target_network": self.target_network.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
             "epsilon": self.epsilon,
             "train_step": self.train_step,
-            "losses": self.losses[-1000:],  # last 1000
+            "losses": self.losses[-2000:],
             "episode_rewards": self.episode_rewards,
         }
-        with open(path, "wb") as f:
-            pickle.dump(data, f)
+        torch.save(data, path)
 
     def load(self, path):
         """Load agent from file."""
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-        for i, p in enumerate(data["q_params"]):
-            np.copyto(self.q_network.params[i], p)
-        for i, p in enumerate(data["target_params"]):
-            np.copyto(self.target_network.params[i], p)
+        data = torch.load(path, map_location=self.device, weights_only=False)
+        self.q_network.load_state_dict(data["q_network"])
+        self.target_network.load_state_dict(data["target_network"])
+        if "optimizer" in data:
+            self.optimizer.load_state_dict(data["optimizer"])
         self.epsilon = data["epsilon"]
         self.train_step = data["train_step"]
         self.losses = data.get("losses", [])

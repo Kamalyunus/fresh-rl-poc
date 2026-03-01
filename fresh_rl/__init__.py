@@ -1,6 +1,6 @@
 """Fresh RL POC - Reinforcement Learning for Markdown Channel Discounting."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from fresh_rl.sumtree import SumTree
 from fresh_rl.prioritized_replay import PrioritizedReplayBuffer
