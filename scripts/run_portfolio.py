@@ -44,6 +44,7 @@ def _pretrain_category(
     demand_mult,
     inventory_mult,
     epsilon_decay,
+    hidden_dim=64,
 ):
     """Pre-train one agent on all products in a category."""
     from fresh_rl.environment import MarkdownProductEnv
@@ -59,7 +60,7 @@ def _pretrain_category(
     n_actions = sample_env.action_space.n
 
     agent = DQNAgent(
-        state_dim=state_dim, n_actions=n_actions, hidden_dim=64,
+        state_dim=state_dim, n_actions=n_actions, hidden_dim=hidden_dim,
         lr=5e-4, gamma=0.97, epsilon_start=1.0, epsilon_end=0.05,
         epsilon_decay=epsilon_decay or 0.999,
         buffer_size=10000, batch_size=32,
@@ -124,6 +125,7 @@ def _run_single_product(
     inventory_mult: float = 1.0,
     epsilon_decay: float = None,
     pretrained_path: str = None,
+    hidden_dim: int = 64,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -157,6 +159,7 @@ def _run_single_product(
         shaping_ratio=shaping_ratio,
         env_overrides=env_overrides if env_overrides else None,
         epsilon_decay=epsilon_decay,
+        hidden_dim=hidden_dim,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -495,6 +498,8 @@ def main():
                         help="Multiply initial_inventory (e.g., 2.0 = double inventory)")
     parser.add_argument("--epsilon-decay", type=float, default=None,
                         help="Epsilon decay rate per episode (default: 0.998 for 2h, 0.997 for 4h)")
+    parser.add_argument("--hidden-dim", type=int, default=64,
+                        help="Hidden layer size for DQN network (default: 64)")
 
     # Transfer learning
     parser.add_argument("--transfer-learning", action="store_true",
@@ -541,6 +546,7 @@ def main():
     print(f"  Eval episodes:  {args.eval_episodes}")
     print(f"  Step hours:     {args.step_hours}h")
     print(f"  Shaping ratio:  {args.shaping_ratio}")
+    print(f"  Hidden dim:     {args.hidden_dim}")
     if args.demand_mult != 1.0:
         print(f"  Demand mult:    {args.demand_mult}x")
     if args.inventory_mult != 1.0:
@@ -565,6 +571,7 @@ def main():
         demand_mult=args.demand_mult,
         inventory_mult=args.inventory_mult,
         epsilon_decay=args.epsilon_decay,
+        hidden_dim=args.hidden_dim,
     )
 
     # ── Phase 1: Category pre-training (if transfer learning enabled) ────
@@ -590,6 +597,7 @@ def main():
             demand_mult=args.demand_mult,
             inventory_mult=args.inventory_mult,
             epsilon_decay=args.epsilon_decay,
+            hidden_dim=args.hidden_dim,
         )
 
         if args.workers > 1:

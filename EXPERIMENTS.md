@@ -332,7 +332,137 @@ python scripts/run_portfolio.py --products salmon_fillet sushi salad_mix \
     --demand-mult 0.5 --inventory-mult 2.0 --save-dir results/tl_test
 ```
 
-**Results**: Pending first full portfolio run with transfer learning.
+### Run A: v070 — TL + 500 fine-tuning episodes (compute-efficient)
+
+**Setup**: 1500 pretrain episodes per category, 500 fine-tuning episodes per SKU, 16 workers. Total: 67,000 episodes.
+
+| Metric | v060 (no TL, 1500ep) | v070 (TL, 500 finetune) |
+|--------|---------------------|------------------------|
+| Shaping wins | 53/110 (48%) | **65/110 (59%)** |
+| Beats best baseline | 22/110 (20%) | 11/110 (10%) |
+| Total episodes | 165,000 | 67,000 |
+| Runtime (16 workers) | 15.6 min | **6.1 min** |
+
+**Category breakdown (shaping win %)**:
+
+| Category | v060 | v070 | Delta |
+|----------|------|------|-------|
+| seafood | 53% | **80%** | **+27pp** |
+| bakery | 47% | **67%** | +20pp |
+| deli_prepared | 47% | **67%** | +20pp |
+| vegetables | 60% | **67%** | +7pp |
+| fruits | 47% | **60%** | +13pp |
+| dairy | 20% | **40%** | +20pp |
+| meats | 73% | 40% | -33pp |
+| legacy | 20% | **40%** | +20pp |
+
+**Analysis**: Transfer learning dramatically boosts the shaping advantage (48% → 59%) because pre-trained weights give the shaped agent a head start that plain DQN can't match in only 500 episodes. However, beats-baseline dropped (20% → 10%) — 500 fine-tuning episodes isn't enough for absolute policy quality to converge against strong baselines.
+
+### Run B: v071 — TL + 1500 fine-tuning episodes (full convergence)
+
+**Setup**: 1500 pretrain + 1500 fine-tuning episodes per SKU. Total: 177,000 episodes.
+
+| Metric | v060 (no TL) | v070 (500ft) | v071 (1500ft) |
+|--------|-------------|-------------|---------------|
+| Shaping wins | 53/110 (48%) | **65/110 (59%)** | 55/110 (50%) |
+| Beats best baseline | 22/110 (20%) | 11/110 (10%) | **24/110 (22%)** |
+| Runtime | 15.6 min | 6.1 min | 15.2 min |
+
+**Category breakdown (shaping win %)**:
+
+| Category | v060 | v070 | v071 |
+|----------|------|------|------|
+| vegetables | 60% | 67% | **73%** |
+| fruits | 47% | 60% | 60% |
+| meats | 73% | 40% | 47% |
+| bakery | 47% | 67% | 47% |
+| deli_prepared | 47% | 67% | 47% |
+| dairy | 20% | 40% | 40% |
+| seafood | 53% | 80% | 40% |
+| legacy | 20% | 40% | 40% |
+
+**Analysis**: With 1500 fine-tuning episodes, beats-baseline recovers to 22% (matching v060), but shaping win rate drops back to 50% as plain DQN also fully converges. The pre-trained representations help both variants equally given enough training budget.
+
+### Transfer learning conclusions
+
+1. **TL + short fine-tuning (500ep) maximizes shaping advantage**: 59% win rate, 2.5x compute savings, 2.5x faster runtime. Best config when shaping differentiation matters.
+2. **TL + full fine-tuning (1500ep) matches no-TL on absolute quality**: 22% beats-baseline, same as v060. The pre-training doesn't hurt but the advantage narrows as both agents converge.
+3. **The sweet spot is 500-800 fine-tuning episodes**: Enough for pre-trained weights to give shaped DQN an edge before plain DQN catches up.
+4. **Seafood is most TL-sensitive**: Jumped from 53% to 80% with short fine-tuning (hardest category benefits most from pooled experience) but regressed to 40% with full fine-tuning.
+5. **Vegetables consistently improved**: 60% → 67% → 73% across all three configs — TL reliably helps this category.
+
+---
+
+## Iteration 9: Bigger Network + More Episodes (hidden_dim=128, 3000 episodes)
+
+**Goal**: Test whether a larger network and longer training can push beats-baseline higher. All 4 model variants (Plain, Shaped, Plain+TL, Shaped+TL) were tied at ~20-25% beats-baseline with hidden_dim=64 and 1500 episodes.
+
+**Changes**:
+- Threaded `hidden_dim` as a parameter through `train()` and `run_portfolio.py` (was hardcoded at 64)
+- Added `--hidden-dim` CLI flag to `run_portfolio.py` (default: 64)
+
+**Setup**: 2h steps, 3000 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, 16 workers
+
+### Run A: v080 — No TL (hidden_dim=128, 3000 episodes)
+
+| Metric | v071 (64-dim, 1500ep) | v080 No TL (128-dim, 3000ep) |
+|--------|----------------------|------------------------------|
+| Shaping wins | 55/110 (50%) | **63/110 (57%)** |
+| Beats best baseline | 24/110 (22%) | **47/110 (43%)** |
+| Runtime (16 workers) | 15.2 min | 34.1 min |
+
+**Category breakdown (shaping win %)**:
+
+| Category | v071 | v080 No TL |
+|----------|------|------------|
+| legacy | 40% | **80%** |
+| vegetables | 73% | 73% |
+| bakery | 47% | **60%** |
+| deli_prepared | 47% | **60%** |
+| seafood | 40% | **60%** |
+| meats | 47% | 47% |
+| fruits | 60% | 47% |
+| dairy | 40% | 47% |
+
+### Run B: v080 — With TL (hidden_dim=128, 3000 episodes, 1500 pretrain)
+
+| Metric | v080 No TL | v080 TL |
+|--------|-----------|---------|
+| Shaping wins | 63/110 (57%) | 60/110 (55%) |
+| Beats best baseline | **47/110 (43%)** | 44/110 (40%) |
+| Runtime (16 workers) | 34.1 min | 35.4 min |
+
+**Category breakdown (shaping win %) — TL comparison**:
+
+| Category | No TL | TL | Notes |
+|----------|-------|----|-------|
+| dairy | 47% | **67%** | TL helps most |
+| vegetables | **73%** | 67% | |
+| bakery | **60%** | 47% | TL hurts |
+| deli_prepared | **60%** | 33% | TL hurts significantly |
+| seafood | 60% | 60% | Same |
+| fruits | 47% | **53%** | TL helps slightly |
+| meats | 47% | 47% | Same |
+| legacy | **80%** | 80% | Same |
+
+### 4-way comparison (all v080)
+
+| Variant | Beats Baseline | Shaping Wins |
+|---------|---------------|-------------|
+| **Plain (No TL)** | 43% | — |
+| **Shaped (No TL)** | 43% | 57% |
+| **Plain + TL** | 40% | — |
+| **Shaped + TL** | 40% | 55% |
+
+### Analysis
+
+1. **Beats-baseline nearly doubled**: 22% → 43% from the combination of 2x network width (64→128) and 2x training (1500→3000 episodes). This is the single biggest improvement in beats-baseline across all iterations.
+2. **No TL slightly edges TL** (43% vs 40%): With 3000 fine-tuning episodes, both agents fully converge anyway — TL's head start gets washed out. This confirms the pattern from Iteration 8: TL helps most with short fine-tuning budgets.
+3. **TL helps dairy (+20pp) but hurts deli_prepared (-27pp)**: Category pre-training can introduce interference when category-level patterns don't transfer to individual SKUs.
+4. **Shaping wins remain stable at ~55-57%**: The bigger network benefits both plain and shaped equally, so the relative shaping advantage doesn't grow.
+5. **Rewards still climbing at episode 3000**: Training curves showed continued improvement past 2000 episodes, suggesting even more training could push beats-baseline higher.
+
+**Learning**: Network capacity and training budget are the biggest levers for absolute policy quality. Doubling both (64→128 hidden, 1500→3000 episodes) had a much larger effect on beats-baseline (+21pp) than any algorithmic change (TL, shaping, state expansion). Transfer learning is most valuable when compute-constrained — with unlimited budget, direct training matches or beats it.
 
 ---
 
@@ -361,6 +491,8 @@ Shaping is neutral/noise when:
 | Warmup (1000 steps) | Pre-trains the network before online exploration, faster convergence |
 | Slower epsilon decay for 2h mode | 11 actions need more exploration than 6 |
 | Progressive constraint via action masking | Clean, guaranteed valid actions without reward hacking |
+| Transfer learning + short fine-tuning | Pre-trained weights amplify shaping advantage (59% win rate) with 2.5x compute savings |
+| Bigger network + longer training (128-dim, 3000ep) | Single biggest lever for beats-baseline: 22% → 43% (+21pp) |
 
 ### What didn't work / watch out for
 
@@ -371,3 +503,5 @@ Shaping is neutral/noise when:
 | Fast epsilon decay (0.998) with 1500 episodes | Use 0.999 to keep exploring longer |
 | Shaping on easy products (0% waste) | It's just noise — don't expect improvement when the problem is already solved |
 | DQN generates less raw revenue than baselines | Expected — DQN optimizes total reward (revenue minus waste), not revenue alone |
+| TL + long fine-tuning (1500ep) | Shaping advantage disappears as plain DQN also fully converges — use shorter fine-tuning (500-800ep) to preserve the TL benefit |
+| TL + very long fine-tuning (3000ep) | TL slightly hurts vs no-TL (40% vs 43% beats-baseline) — category pre-training can introduce interference with enough direct training |

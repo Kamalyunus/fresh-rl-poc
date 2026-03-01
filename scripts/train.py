@@ -36,6 +36,7 @@ def train(
     env_overrides: dict = None,
     epsilon_decay: float = None,
     pretrained_path: str = None,
+    hidden_dim: int = 64,
 ):
     """Train a DQN agent and save results."""
 
@@ -73,6 +74,7 @@ def train(
     print(f"  Initial inventory: ~{env.initial_inventory} units")
     print(f"  Base price:        ${env.base_price:.2f}")
     print(f"  State dim:         {state_dim}")
+    print(f"  Hidden dim:        {hidden_dim}")
     print(f"  Actions:           {n_actions} ({list(env.DISCOUNT_LEVELS)})")
     print(f"  Episodes:          {n_episodes}")
     print(f"  Reward shaping:    {reward_shaping}" +
@@ -93,7 +95,7 @@ def train(
     agent = DQNAgent(
         state_dim=state_dim,
         n_actions=n_actions,
-        hidden_dim=64,
+        hidden_dim=hidden_dim,
         lr=5e-4,
         gamma=0.97,
         epsilon_start=1.0,
