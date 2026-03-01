@@ -122,16 +122,21 @@ Environment                Agent                     Replay Buffer
 
 The markdown pricing problem is modeled as a finite-horizon Markov Decision Process.
 
-### State Space (6-dimensional, normalized to [0,1])
+### State Space (9-dimensional, normalized to [0,1])
 
-| Index | Feature | Normalization | Signal |
-|-------|---------|---------------|--------|
+| Index | Feature | Formula / Normalization | Signal |
+|-------|---------|------------------------|--------|
 | 0 | `hours_remaining` | `/ markdown_window_hours` | Time pressure — how much time left to sell |
 | 1 | `inventory_remaining` | `/ actual_initial_inventory` | Stock level — what fraction remains unsold |
 | 2 | `current_discount_idx` | `/ (n_actions - 1)` | Current pricing state — where in the discount ladder |
-| 3 | `time_of_day` | `/ (n_time_blocks - 1)` | Intraday traffic pattern position |
-| 4 | `day_of_week` | `/ 6.0` | Weekly demand pattern (Mon=0, Sun=6) |
-| 5 | `recent_velocity` | `/ (initial_inventory * 0.5)` | Sales momentum — rolling mean of last 3 steps |
+| 3 | `tod_sin` | `(sin(2π·tod/n_blocks) + 1) / 2` | Cyclical time-of-day (sin component) |
+| 4 | `tod_cos` | `(cos(2π·tod/n_blocks) + 1) / 2` | Cyclical time-of-day (cos component) |
+| 5 | `dow_sin` | `(sin(2π·dow/7) + 1) / 2` | Cyclical day-of-week (sin component) |
+| 6 | `dow_cos` | `(cos(2π·dow/7) + 1) / 2` | Cyclical day-of-week (cos component) |
+| 7 | `recent_velocity` | `/ (initial_inventory * 0.5)` | Sales momentum — rolling mean of last 3 steps |
+| 8 | `sell_through_rate` | `(total_sold/step_count) / (initial_inv/episode_len)` | Actual vs ideal sell-through pace (1.0 = on track) |
+
+**Cyclical encoding** uses sin/cos pairs so the network learns that 11pm neighbors midnight and Sunday neighbors Monday — linear floats put these maximally apart. **Sell-through rate** gives the agent a direct "am I ahead or behind pace?" signal without requiring the network to learn the division between inventory and time features.
 
 All features are clipped to [0, 1] after normalization. This keeps the neural network's input distribution stable across products with vastly different absolute scales.
 
@@ -513,10 +518,10 @@ Sampling: uniform random (each transition equally likely)
 ```
 
 Each transition includes:
-- **State** (6-dim float32): the observation before the action
+- **State** (9-dim float32): the observation before the action
 - **Action** (int): the discount level selected
 - **Reward** (float): possibly shaped reward
-- **Next state** (6-dim float32): the observation after the action
+- **Next state** (9-dim float32): the observation after the action
 - **Done** (bool): whether the episode ended
 - **Next action mask** (n_actions bool): valid actions from next state
 

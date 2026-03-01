@@ -267,7 +267,7 @@ def plot_policy_heatmap(agent, env, save_dir, suffix):
 
     for i, inv_norm in enumerate(reversed(inv_range)):
         for j, hours_norm in enumerate(hours_range):
-            obs = np.array([hours_norm, inv_norm, 0.0, 0.5, 0.5, 0.3], dtype=np.float32)
+            obs = np.array([hours_norm, inv_norm, 0.0, 0.5, 0.5, 0.5, 0.5, 0.3, 0.5], dtype=np.float32)
             mask = np.ones(len(discount_levels), dtype=bool)
             action = agent.select_action(obs, action_mask=mask)
             policy_grid[i, j] = discount_levels[action] * 100

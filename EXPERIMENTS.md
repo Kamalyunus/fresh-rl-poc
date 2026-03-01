@@ -231,6 +231,80 @@ Net expansion: ~287 → ~650 lines in `visualize.py`.
 
 ---
 
+## Iteration 7: Expanded State Space — Cyclical Time Encoding + Sell-Through Rate
+
+**Goal**: Improve agent's ability to learn time-of-day and day-of-week demand patterns by replacing linear floats with cyclical sin/cos encoding, and add a sell-through rate feature so the agent can directly observe whether it's ahead or behind pace.
+
+**Problem with 6-dim state**: Linear encoding of `time_of_day` (0.0–1.0) and `day_of_week` (0.0–1.0) puts adjacent times far apart — 11pm (0.92) and midnight (0.0) are maximally distant. The agent can't easily learn that these are neighbors. A single float also can't disambiguate symmetric positions on a cycle.
+
+**Changes**:
+
+### State expansion: 6-dim → 9-dim
+
+| Index | Feature | Formula | Signal |
+|-------|---------|---------|--------|
+| 0 | `hours_remaining` | unchanged | Time pressure |
+| 1 | `inventory_remaining` | unchanged | Stock level |
+| 2 | `current_discount_idx` | unchanged | Price ladder position |
+| 3 | `tod_sin` | `(sin(2π·tod/n_blocks) + 1) / 2` | Cyclical time-of-day |
+| 4 | `tod_cos` | `(cos(2π·tod/n_blocks) + 1) / 2` | Cyclical time-of-day |
+| 5 | `dow_sin` | `(sin(2π·dow/7) + 1) / 2` | Cyclical day-of-week |
+| 6 | `dow_cos` | `(cos(2π·dow/7) + 1) / 2` | Cyclical day-of-week |
+| 7 | `recent_velocity` | unchanged (moved from index 5) | Sales momentum |
+| 8 | `sell_through_rate` | `(total_sold/step_count) / (initial_inv/episode_len)` | Am I ahead or behind pace? |
+
+**Cyclical encoding**: Sin/cos pairs preserve adjacency — 11pm and midnight are neighbors in the encoded space. Two components disambiguate all positions (sin alone has symmetry). Uses only observable data (clock time, calendar day).
+
+**Sell-through rate**: Ratio of actual units-sold-per-step to the ideal pace needed for full clearance. Value of 1.0 = on track, <1.0 = behind pace. Gives the agent a direct "pace" signal without requiring the MLP to learn the division between inventory and time features.
+
+**No simulator leakage**: The agent sees clock time and calendar day (observable in production) but never sees the demand multipliers, price elasticity, or Poisson parameters. It must discover demand patterns through experience.
+
+### Files modified
+
+- `environment.py`: `_get_obs()` expanded to 9-dim, observation_space updated
+- `baselines.py`: `DemandResponsive` velocity index updated (5 → 7)
+- `visualize.py`: Synthetic observation in policy heatmap updated to 9-dim
+- `ARCHITECTURE.md`: State table updated
+- `README.md`: MDP formulation and results updated
+
+No changes needed to `dqn_agent.py`, `train.py`, `evaluate.py`, `run_portfolio.py`, or replay buffers — all dynamically read `observation_space.shape[0]`.
+
+### Results (v060 — 110 SKUs, hard mode, 16 workers)
+
+**Setup**: 2h steps, 1500 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999
+
+| Metric | v050 (6-dim) | v060 (9-dim) | Delta |
+|--------|-------------|-------------|-------|
+| Shaping wins | 56/110 (51%) | 53/110 (48%) | -3 |
+| Beats best baseline | 17/110 (15%) | 22/110 (20%) | **+5** |
+| Run time | 72.6 min (1 worker) | 15.6 min (16 workers) | 4.7x faster |
+
+**Category comparison (shaping win %)**:
+
+| Category | v050 | v060 | Delta |
+|----------|------|------|-------|
+| meats | 33% | **73%** | **+40pp** |
+| bakery | 40% | 47% | +7pp |
+| seafood | 53% | 53% | same |
+| fruits | 47% | 47% | same |
+| vegetables | 73% | 60% | -13pp |
+| deli_prepared | 67% | 47% | -20pp |
+| dairy | 47% | 20% | -27pp |
+| legacy | 40% | 20% | -20pp |
+
+**Dominant baselines**: Demand Responsive (29 SKUs) and Backloaded Progressive (28 SKUs) are the strongest baselines, together winning 52% of SKUs. No baseline accesses simulator internals — they use only observable state (time, inventory, velocity).
+
+**Analysis**:
+
+1. **Beats-baseline rate improved** (15% → 20%) — the richer state helps the agent find better absolute policies
+2. **Meats category jumped +40pp** — suggests cyclical features help where time-of-day demand patterns are strongest
+3. **Shaping win rate dipped slightly** (51% → 48%) — the expanded state gives plain DQN more signal too, narrowing the shaping advantage
+4. **Some categories regressed** (dairy -27pp, deli_prepared -20pp) — the larger state space may need more training budget to converge for certain profiles
+
+**Learning**: Cyclical encoding + sell-through rate help the agent learn time-dependent strategies (meats: +40pp). The expanded state benefits both plain and shaped DQN, so the shaping advantage narrows. Categories where waste is already near-zero (dairy, vegetables) don't benefit from the additional features — the problem was already solved. Future work: try more episodes (2500+) for underperforming categories, or explore network architecture changes to better exploit the richer state.
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps

@@ -7,7 +7,8 @@ Models a perishable product on an ecommerce markdown landing page:
 - Discounts can only go deeper (never revert to a shallower level)
 
 State: [hours_remaining, inventory_remaining, current_discount_idx,
-        time_of_day, day_of_week, recent_velocity]  (all normalized to [0,1])
+        tod_sin, tod_cos, dow_sin, dow_cos,
+        recent_velocity, sell_through_rate]  (9-dim, all normalized to [0,1])
 Action: discrete discount levels (6 levels for 4h, 11 levels for 2h)
 Reward: revenue - waste_penalty - holding_cost + clearance_bonus
 """
@@ -83,10 +84,10 @@ class MarkdownChannelEnv(gym.Env):
         # Action space: discrete discount levels (6 for 4h, 11 for 2h)
         self.action_space = spaces.Discrete(len(self.DISCOUNT_LEVELS))
 
-        # Observation space: 6-dim, all normalized to [0, 1]
+        # Observation space: 9-dim, all normalized to [0, 1]
         self.observation_space = spaces.Box(
-            low=np.zeros(6, dtype=np.float32),
-            high=np.ones(6, dtype=np.float32),
+            low=np.zeros(9, dtype=np.float32),
+            high=np.ones(9, dtype=np.float32),
             dtype=np.float32,
         )
 
@@ -112,13 +113,34 @@ class MarkdownChannelEnv(gym.Env):
         velocity = np.mean(self.recent_sales[-3:]) if self.recent_sales else 0.0
         max_velocity = self.actual_initial_inventory * 0.5
 
+        # Cyclical encoding for time_of_day
+        tod_angle = 2.0 * np.pi * self.time_of_day / self.n_time_blocks
+        tod_sin = (np.sin(tod_angle) + 1.0) / 2.0
+        tod_cos = (np.cos(tod_angle) + 1.0) / 2.0
+
+        # Cyclical encoding for day_of_week
+        dow_angle = 2.0 * np.pi * self.day_of_week / 7.0
+        dow_sin = (np.sin(dow_angle) + 1.0) / 2.0
+        dow_cos = (np.cos(dow_angle) + 1.0) / 2.0
+
+        # Sell-through rate: actual vs ideal pace to clear inventory
+        if self.step_count > 0:
+            ideal_rate = self.actual_initial_inventory / self.episode_length
+            actual_rate = self.total_sold / self.step_count
+            sell_through_rate = min(actual_rate / max(ideal_rate, 1e-3), 1.0)
+        else:
+            sell_through_rate = 0.0
+
         obs = np.array([
-            self._hours_remaining() / self.markdown_window_hours,
-            self.inventory_remaining / max(self.actual_initial_inventory, 1),
-            self.current_discount_idx / max(len(self.DISCOUNT_LEVELS) - 1, 1),
-            self.time_of_day / max(self.n_time_blocks - 1, 1),
-            self.day_of_week / 6.0,
-            min(velocity / max(max_velocity, 1), 1.0),
+            self._hours_remaining() / self.markdown_window_hours,              # [0]
+            self.inventory_remaining / max(self.actual_initial_inventory, 1),   # [1]
+            self.current_discount_idx / max(len(self.DISCOUNT_LEVELS) - 1, 1), # [2]
+            tod_sin,                                                           # [3]
+            tod_cos,                                                           # [4]
+            dow_sin,                                                           # [5]
+            dow_cos,                                                           # [6]
+            min(velocity / max(max_velocity, 1), 1.0),                         # [7]
+            sell_through_rate,                                                 # [8]
         ], dtype=np.float32)
 
         return np.clip(obs, 0.0, 1.0)

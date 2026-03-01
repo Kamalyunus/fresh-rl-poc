@@ -121,7 +121,7 @@ class DemandResponsive(BasePolicy):
         if env is None:
             hours_frac = obs[0]
             inv_frac = obs[1]
-            velocity_frac = obs[5]
+            velocity_frac = obs[7]
             current_idx = int(obs[2] * (n - 1))
         else:
             hours_frac = (env.episode_length - env.step_count) / max(env.episode_length, 1)

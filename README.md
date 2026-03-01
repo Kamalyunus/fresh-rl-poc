@@ -14,7 +14,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 
 | Component | Design |
 |-----------|--------|
-| **State** | `[hours_remaining, inventory_remaining, current_discount_idx, time_of_day, day_of_week, recent_velocity]` (6-dim, normalized to [0,1]) |
+| **State** | `[hours_remaining, inventory_remaining, current_discount_idx, tod_sin, tod_cos, dow_sin, dow_cos, recent_velocity, sell_through_rate]` (9-dim, normalized to [0,1]) |
 | **Action** | 4h mode: 6 levels {20%..70%}, 2h mode: 11 levels {20%..70% by 5%} — with progressive constraint |
 | **Reward** | Revenue - waste penalty - holding cost + clearance bonus |
 | **Transition** | Stochastic demand (Poisson) with price elasticity, intraday pattern, day-of-week effect |
@@ -161,19 +161,27 @@ The `shaping_ratio=0.2` normalizes the shaping signal to 20% of expected revenue
 
 ## Results
 
-### Portfolio Validation (110 SKUs, hard mode)
+### Portfolio Validation (110 SKUs, hard mode, 9-dim state)
 
-Best configuration: 2h steps, 1500 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999
+Best configuration: 2h steps, 1500 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, 9-dim cyclical state
 
-| Policy | Avg Reward | Avg Revenue | Waste Rate | Clearance |
-|--------|-----------|-------------|------------|-----------|
-| **DQN Shaped** | **97.4** | $98.8 | **4.9%** | 95.1% |
-| DQN Plain | 92.3 | $99.4 | 5.8% | 94.2% |
-| Linear Progressive | 87.5 | $116.5 | 9.3% | 90.7% |
-| Demand Responsive | 87.0 | $107.3 | 8.8% | 91.2% |
-| Fixed 40% | 76.2 | $115.5 | 11.9% | 88.1% |
+| Metric | Value |
+|--------|-------|
+| Shaping wins | 53/110 (48%) |
+| Beats best baseline | 22/110 (20%) |
 
-**DQN Shaped is the #1 policy**, with 55% shaping win rate across 110 SKUs. Shaping wins most in categories with real waste risk: seafood (73%), meats (67%), fruits (67%).
+**Category breakdown**:
+
+| Category | SKUs | Win% | Avg Rev Delta | Avg Waste Delta |
+|----------|------|------|---------------|-----------------|
+| meats | 15 | **73%** | +0.0% | +1.4pp |
+| vegetables | 15 | 60% | +0.2% | +0.0pp |
+| seafood | 15 | 53% | -2.2% | +2.0pp |
+| bakery | 15 | 47% | -0.5% | +0.0pp |
+| deli_prepared | 15 | 47% | -1.6% | +0.1pp |
+| fruits | 15 | 47% | -0.2% | +0.0pp |
+| dairy | 15 | 20% | -1.1% | +0.0pp |
+| legacy | 5 | 20% | -1.1% | +0.3pp |
 
 See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history and learnings.
 
