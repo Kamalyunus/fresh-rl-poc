@@ -48,6 +48,7 @@ def _pretrain_category(
     replay_ratio=1,
     batch_size=32,
     buffer_size=10000,
+    n_step=1,
 ):
     """Pre-train one agent on all products in a category."""
     from fresh_rl.environment import MarkdownProductEnv
@@ -69,6 +70,7 @@ def _pretrain_category(
         buffer_size=buffer_size, batch_size=batch_size,
         reward_shaping=False,  # no shaping during pre-training
         seed=seed, use_per=use_per,
+        n_step=n_step,
     )
 
     print(f"  [PRETRAIN] {category}: {len(products)} products, {total_episodes} episodes")
@@ -133,6 +135,7 @@ def _run_single_product(
     replay_ratio: int = 1,
     batch_size: int = 32,
     buffer_size: int = 10000,
+    n_step: int = 1,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -170,6 +173,7 @@ def _run_single_product(
         replay_ratio=replay_ratio,
         batch_size=batch_size,
         buffer_size=buffer_size,
+        n_step=n_step,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -516,6 +520,8 @@ def main():
                         help="Batch size for DQN training (default: 32)")
     parser.add_argument("--buffer-size", type=int, default=10000,
                         help="Replay buffer size (default: 10000)")
+    parser.add_argument("--n-step", type=int, default=1,
+                        help="N-step returns for DQN (default: 1, try 5 for faster credit assignment)")
 
     # Transfer learning
     parser.add_argument("--transfer-learning", action="store_true",
@@ -566,6 +572,7 @@ def main():
     print(f"  Replay ratio:   {args.replay_ratio}")
     print(f"  Batch size:     {args.batch_size}")
     print(f"  Buffer size:    {args.buffer_size}")
+    print(f"  N-step returns: {args.n_step}")
     if args.demand_mult != 1.0:
         print(f"  Demand mult:    {args.demand_mult}x")
     if args.inventory_mult != 1.0:
@@ -594,6 +601,7 @@ def main():
         replay_ratio=args.replay_ratio,
         batch_size=args.batch_size,
         buffer_size=args.buffer_size,
+        n_step=args.n_step,
     )
 
     # ── Phase 1: Category pre-training (if transfer learning enabled) ────
@@ -623,6 +631,7 @@ def main():
             replay_ratio=args.replay_ratio,
             batch_size=args.batch_size,
             buffer_size=args.buffer_size,
+            n_step=args.n_step,
         )
 
         if args.workers > 1:

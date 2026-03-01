@@ -17,6 +17,52 @@ import torch.nn as nn
 from collections import deque
 
 
+class NStepAccumulator:
+    """Accumulates n transitions and computes n-step returns before pushing to buffer.
+
+    Sits between store_transition() and the replay buffer. Collects n transitions,
+    computes G_n = r_0 + gamma*r_1 + ... + gamma^(n-1)*r_{n-1}, then pushes
+    (s_0, a_0, G_n, s_n, done_n, mask_n) to the underlying buffer.
+
+    At episode end (done=True), flushes remaining transitions with shorter
+    lookbacks — all have done=True so the bootstrap term is 0.
+    """
+
+    def __init__(self, n_step: int, gamma: float, buffer):
+        self.n_step = n_step
+        self.gamma = gamma
+        self.buffer = buffer
+        self._deque = deque(maxlen=n_step)
+
+    def push(self, state, action, reward, next_state, done, next_action_mask):
+        self._deque.append((state, action, reward, next_state, done, next_action_mask))
+        if done:
+            self._flush()
+        elif len(self._deque) == self.n_step:
+            self._push_nstep()
+
+    def _push_nstep(self):
+        """Compute n-step return from full deque and push oldest transition."""
+        G = 0.0
+        for i, (_, _, r, _, _, _) in enumerate(self._deque):
+            G += (self.gamma ** i) * r
+        s_0, a_0 = self._deque[0][0], self._deque[0][1]
+        _, _, _, s_n, done_n, mask_n = self._deque[-1]
+        self.buffer.push(s_0, a_0, G, s_n, done_n, mask_n)
+        self._deque.popleft()
+
+    def _flush(self):
+        """Flush remaining transitions at episode end."""
+        while self._deque:
+            G = 0.0
+            for i, (_, _, r, _, _, _) in enumerate(self._deque):
+                G += (self.gamma ** i) * r
+            s_0, a_0 = self._deque[0][0], self._deque[0][1]
+            _, _, _, s_n, done_n, mask_n = self._deque[-1]
+            self.buffer.push(s_0, a_0, G, s_n, done_n, mask_n)
+            self._deque.popleft()
+
+
 class ReplayBuffer:
     """Fixed-size circular replay buffer with action mask support."""
 
@@ -76,9 +122,11 @@ class DQNAgent:
         per_beta_end: float = 1.0,
         per_beta_anneal_steps: int = None,
         per_epsilon: float = 1e-5,
+        n_step: int = 1,
     ):
         self.n_actions = n_actions
         self.gamma = gamma
+        self.n_step = n_step
         self.epsilon = epsilon_start
         self.epsilon_end = epsilon_end
         self.epsilon_decay = epsilon_decay
@@ -116,6 +164,10 @@ class DQNAgent:
             )
         else:
             self.replay_buffer = ReplayBuffer(buffer_size, n_actions=n_actions)
+
+        # N-step accumulator (wraps buffer when n_step > 1)
+        if n_step > 1:
+            self._nstep = NStepAccumulator(n_step, gamma, self.replay_buffer)
 
         # Training stats
         self.train_step = 0
@@ -192,7 +244,10 @@ class DQNAgent:
     def store_transition(self, state, action, reward, next_state, done, next_action_mask=None):
         """Store a transition in replay buffer (with optional reward shaping)."""
         shaped_reward = self._shape_reward(state, action, reward, next_state)
-        self.replay_buffer.push(state, action, shaped_reward, next_state, done, next_action_mask)
+        if self.n_step > 1:
+            self._nstep.push(state, action, shaped_reward, next_state, done, next_action_mask)
+        else:
+            self.replay_buffer.push(state, action, shaped_reward, next_state, done, next_action_mask)
 
     def train_step_fn(self):
         """Perform one training step (sample batch + gradient update)."""
@@ -239,7 +294,7 @@ class DQNAgent:
             all_masked = ~next_masks_t.any(dim=1)
             max_next_q[all_masked] = 0.0
 
-            targets = rewards_t + self.gamma * max_next_q * (1 - dones_t)
+            targets = rewards_t + (self.gamma ** self.n_step) * max_next_q * (1 - dones_t)
 
         # TD errors (for PER priority updates)
         td_errors = (current_q - targets).detach().numpy()

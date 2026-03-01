@@ -16,14 +16,15 @@ Detailed technical documentation of the reinforcement learning system for perish
 8. [Experience Replay](#experience-replay)
 9. [Prioritized Experience Replay (PER)](#prioritized-experience-replay-per)
 10. [SumTree Data Structure](#sumtree-data-structure)
-11. [Action Masking (Progressive Constraint)](#action-masking-progressive-constraint)
-12. [Reward Shaping](#reward-shaping)
-13. [Historical Data Pre-filling](#historical-data-pre-filling)
-14. [Demand Model](#demand-model)
-15. [Baseline Policies](#baseline-policies)
-16. [Training Pipeline](#training-pipeline)
-17. [Portfolio Runner](#portfolio-runner)
-18. [Product Catalog](#product-catalog)
+11. [N-Step Returns](#n-step-returns)
+12. [Action Masking (Progressive Constraint)](#action-masking-progressive-constraint)
+13. [Reward Shaping](#reward-shaping)
+14. [Historical Data Pre-filling](#historical-data-pre-filling)
+15. [Demand Model](#demand-model)
+16. [Baseline Policies](#baseline-policies)
+17. [Training Pipeline](#training-pipeline)
+18. [Portfolio Runner](#portfolio-runner)
+19. [Product Catalog](#product-catalog)
 
 ---
 
@@ -402,7 +403,7 @@ target = r                                      (if terminal)
 1. Sample mini-batch {(s, a, r, s', done)} from replay buffer
 2. Compute Double DQN targets:
      a* = argmax_a' Q_online(s', a')   (online selects, with mask)
-     y = r + gamma * Q_target(s', a*) * (1 - done)
+     y = r + gamma^n_step * Q_target(s', a*) * (1 - done)
 3. Forward pass: Q_theta(s) for all actions
 4. Loss: MSE between Q_theta(s, a) and y for taken actions only
 5. loss.backward() + clip_grad_norm_ + optimizer.step()
@@ -686,6 +687,47 @@ A second tree with the same structure tracks the minimum priority instead of the
 # Min-tree propagation
 min_tree[parent] = min(min_tree[left], min_tree[right])
 ```
+
+---
+
+## N-Step Returns
+
+### Motivation
+
+Standard 1-step DQN uses `target = r + gamma * Q(s')`, which propagates reward information one step at a time. For our short episodes (12-24 steps), this means the terminal reward signal (waste penalty, clearance bonus) takes many training iterations to propagate backward to early actions. N-step returns accelerate this by looking ahead multiple steps:
+
+```
+G_n = r_0 + gamma * r_1 + gamma^2 * r_2 + ... + gamma^(n-1) * r_{n-1}
+target = G_n + gamma^n * Q(s_n) * (1 - done_n)
+```
+
+For 12-24 step episodes, n=4-8 is the sweet spot (per Rainbow DQN ablation research). This directly propagates rewards across ~1/3 of the episode in a single update, dramatically improving credit assignment.
+
+### NStepAccumulator Design
+
+The `NStepAccumulator` class sits between `store_transition()` and the replay buffer:
+
+```python
+class NStepAccumulator:
+    def __init__(self, n_step, gamma, buffer):
+        self._deque = deque(maxlen=n_step)  # sliding window
+
+    def push(state, action, reward, next_state, done, next_action_mask):
+        # Append transition to deque
+        # If done: flush all remaining transitions
+        # Elif deque full: compute n-step return from window, push oldest
+```
+
+**Normal operation** (deque full, not terminal): computes `G_n` from the n transitions in the deque, pushes `(s_0, a_0, G_n, s_n, done_n, mask_n)` to the underlying buffer, then poplefts the oldest transition.
+
+**Episode boundary** (`done=True`): flushes all remaining transitions. Each gets a progressively shorter lookback. Since all these transitions lead to a terminal state (`done=True`), the bootstrap term `gamma^n * Q(s_n)` is zeroed out — no need to track the actual step count.
+
+### Compatibility
+
+- **Reward shaping**: Shaping is applied per-transition *before* the accumulator receives them. The potential-based shaping terms telescope correctly when summed: `sum(gamma^i * [r_i + gamma*Phi(s_{i+1}) - Phi(s_i)])` preserves the PBRS guarantee.
+- **PER**: N-step returns are stored in the PER buffer like any other transition — priorities are based on TD error against the n-step target.
+- **Historical pre-fill**: `fill_buffer()` calls `agent.store_transition()` with `done` flags at episode boundaries, so n-step accumulation works automatically.
+- **Bootstrap discount**: The training step uses `gamma^n_step` instead of `gamma` for the bootstrap term, matching the n-step return formula.
 
 ---
 
@@ -1065,6 +1107,7 @@ Visualization (scripts/visualize.py):
 | `epsilon_decay` | 0.997 (4h) / 0.998-0.999 (2h) | Slower for larger action spaces |
 | `buffer_size` | 10,000 | ~1000 episodes of experience |
 | `batch_size` | 32 | Standard mini-batch size |
+| `n_step` | 1 (default), 5 (recommended) | N-step returns for faster credit assignment in short episodes |
 | `tau` | 0.005 | Soft target update rate |
 | `PER alpha` | 0.6 | Moderate prioritization |
 | `PER beta` | 0.4 -> 1.0 | Anneal IS correction |

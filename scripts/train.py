@@ -40,6 +40,7 @@ def train(
     replay_ratio: int = 1,
     batch_size: int = 32,
     buffer_size: int = 10000,
+    n_step: int = 1,
 ):
     """Train a DQN agent and save results."""
 
@@ -81,6 +82,7 @@ def train(
     print(f"  Replay ratio:      {replay_ratio}")
     print(f"  Batch size:        {batch_size}")
     print(f"  Buffer size:       {buffer_size}")
+    print(f"  N-step returns:    {n_step}")
     print(f"  Actions:           {n_actions} ({list(env.DISCOUNT_LEVELS)})")
     print(f"  Episodes:          {n_episodes}")
     print(f"  Reward shaping:    {reward_shaping}" +
@@ -113,6 +115,7 @@ def train(
         waste_cost_scale=waste_cost_scale,
         seed=seed,
         use_per=use_per,
+        n_step=n_step,
     )
 
     # Transfer learning: load pre-trained weights
@@ -272,6 +275,7 @@ def train(
         "replay_ratio": replay_ratio,
         "batch_size": batch_size,
         "buffer_size": buffer_size,
+        "n_step": n_step,
         "seed": seed,
         "episode_rewards": episode_rewards,
         "episode_revenues": episode_revenues,

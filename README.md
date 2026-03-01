@@ -27,6 +27,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Double DQN** with soft target updates (tau=0.005) — PyTorch-based
 - **Prioritized Experience Replay** (SumTree-based) for sample-efficient learning
 - **Historical data pre-filling** from baseline policies to bootstrap the replay buffer
+- **N-step returns** for faster credit assignment in short episodes (12-24 steps)
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
 - **7 baseline policies** for rigorous comparison
 - **Transfer learning**: category pre-training pools experience across SKUs, per-SKU fine-tuning adapts to individual demand profiles (2.5x compute savings)
@@ -153,6 +154,7 @@ The `shaping_ratio=0.2` normalizes the shaping signal to 20% of expected revenue
 - **Soft target updates**: `tau=0.005` for smooth target tracking instead of hard periodic copies
 - **Prioritized Experience Replay**: SumTree-based, prioritizes high-TD-error transitions
 - **Historical pre-fill**: Seeds replay buffer with baseline policy rollouts before training begins
+- **N-step returns**: Propagates rewards across multiple steps (n=5) for faster convergence in short episodes
 - **Warmup gradient steps**: Runs N gradient steps on buffered data before online training
 
 ## Baselines

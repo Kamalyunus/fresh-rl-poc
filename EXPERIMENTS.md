@@ -523,6 +523,31 @@ The replay ratio / batch size / buffer size parameters remain available for futu
 
 ---
 
+## Iteration 11: N-Step Returns
+
+**Goal**: Beat v0.8's 43% beats-baseline by using n-step returns to propagate rewards faster through short episodes (12-24 steps). N-step replaces single-step TD targets `r + gamma * Q(s')` with multi-step targets `G_n + gamma^n * Q(s_n)`.
+
+**Changes**:
+- Added `NStepAccumulator` class to `dqn_agent.py` — sits between `store_transition()` and replay buffer, computes n-step returns with correct episode boundary handling
+- Added `n_step` parameter to `DQNAgent`, `train()`, and `run_portfolio.py` CLI (`--n-step`)
+- Updated bootstrap discount in training step: `gamma` → `gamma^n_step`
+
+**Hypothesis**: For 12-24 step episodes, n=5 propagates rewards across ~1/3 of the episode in a single update, improving credit assignment. Per Rainbow DQN ablations, n=4-8 is the sweet spot for short-horizon tasks.
+
+**Setup (v1.0)**: 2h steps, 3000 episodes, PER + prefill, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, **n_step=5**, 16 workers
+
+| Setting | v0.8 | v1.0 |
+|---------|------|------|
+| Episodes | 3000 | 3000 |
+| Hidden dim | 128 | 128 |
+| N-step | 1 | **5** |
+
+### Results
+
+*(To be filled after experiment run)*
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps
