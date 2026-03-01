@@ -21,12 +21,18 @@ def main():
     parser = argparse.ArgumentParser(description="Run complete Markdown Channel RL pipeline")
     parser.add_argument("--product", type=str, default="salad_mix",
                         choices=["salad_mix", "fresh_chicken", "yogurt", "bakery_bread", "sushi"])
-    parser.add_argument("--episodes", type=int, default=500)
+    parser.add_argument("--episodes", type=int, default=1000)
     parser.add_argument("--eval-episodes", type=int, default=200)
     parser.add_argument("--step-hours", type=int, default=4, choices=[2, 4],
                         help="Hours per decision step (2 or 4)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=str, default="results")
+
+    # DQN variants
+    parser.add_argument("--no-double-dqn", action="store_true",
+                        help="Disable Double DQN (enabled by default)")
+    parser.add_argument("--soft-target-tau", type=float, default=0.005,
+                        help="Soft target update rate (0 = hard updates only)")
 
     # PER and pre-fill options
     parser.add_argument("--per", action="store_true", help="Enable Prioritized Experience Replay")
@@ -38,6 +44,8 @@ def main():
                         help="Gradient steps on buffered data before online training")
     parser.add_argument("--warmup-epsilon", type=float, default=None,
                         help="Starting epsilon after warmup")
+    parser.add_argument("--shaping-ratio", type=float, default=0.2,
+                        help="Shaping strength relative to revenue scale (default: 0.2)")
 
     args = parser.parse_args()
 
@@ -48,13 +56,16 @@ def main():
     print(f"  Config: {args.product}, {args.step_hours}h steps")
     print("=" * 70)
 
-    # Common PER/prefill kwargs
+    # Common DQN/PER/prefill kwargs
     per_kwargs = dict(
         use_per=args.per,
         prefill=args.prefill,
         prefill_episodes=args.prefill_episodes,
         warmup_steps=args.warmup_steps,
         warmup_epsilon=args.warmup_epsilon,
+        double_dqn=not args.no_double_dqn,
+        soft_target_tau=args.soft_target_tau if args.soft_target_tau > 0 else None,
+        shaping_ratio=args.shaping_ratio,
     )
 
     per_suffix = "_per" if args.per else ""
@@ -104,11 +115,12 @@ def main():
         n_episodes=args.eval_episodes,
         seed=args.seed,
         save_dir=args.save_dir,
+        use_per=args.per,
     )
 
     # Phase 4: Visualize
     print("\n[PHASE 4] Generating visualizations...")
-    generate_all_plots(product=args.product, step_hours=args.step_hours, save_dir=args.save_dir)
+    generate_all_plots(product=args.product, step_hours=args.step_hours, save_dir=args.save_dir, use_per=args.per)
 
     print("\n" + "=" * 70)
     print("  PIPELINE COMPLETE!")

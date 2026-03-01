@@ -19,7 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Style config
 COLORS = {
     "DQN Agent": "#2E86C1",
+    "DQN Agent + PER": "#2E86C1",
     "DQN + Reward Shaping": "#1B4F72",
+    "DQN + Shaping + PER": "#1B4F72",
     "Immediate Deep 70%": "#E74C3C",
     "Linear Progressive": "#E67E22",
     "Backloaded Progressive": "#F39C12",
@@ -42,6 +44,16 @@ def plot_training_curves(history, save_dir):
     """Plot training curves: reward, revenue, waste, clearance over episodes."""
     step_hours = history.get("step_hours", 4)
     suffix = f"{history['product']}_{step_hours}h"
+    if history.get("use_per", False):
+        suffix += "_per"
+
+    n_episodes = len(history["episode_rewards"])
+    # Adaptive smoothing: ~5% of total episodes, minimum 20, maximum 100
+    window = max(20, min(100, n_episodes // 20))
+
+    # Extract greedy eval data if available
+    greedy_eval = history.get("greedy_eval", [])
+    has_greedy = len(greedy_eval) > 0
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(f"Markdown Channel RL — Training Progress ({history['product']}, {step_hours}h steps)",
@@ -50,8 +62,12 @@ def plot_training_curves(history, save_dir):
     # Reward curve
     ax = axes[0, 0]
     rewards = history["episode_rewards"]
-    ax.plot(rewards, alpha=0.2, color="#2E86C1", linewidth=0.5)
-    ax.plot(smooth(rewards), color="#2E86C1", linewidth=2, label="Smoothed (20-ep)")
+    ax.plot(rewards, alpha=0.15, color="#2E86C1", linewidth=0.5)
+    ax.plot(smooth(rewards, window), color="#2E86C1", linewidth=2, label=f"Smoothed ({window}-ep)")
+    if has_greedy:
+        g_eps = [g["episode"] for g in greedy_eval]
+        g_rew = [g["reward"] for g in greedy_eval]
+        ax.plot(g_eps, g_rew, "o-", color="#E74C3C", linewidth=2, markersize=4, label="Greedy eval")
     ax.set_xlabel("Episode")
     ax.set_ylabel("Total Reward")
     ax.set_title("Episode Reward")
@@ -61,8 +77,11 @@ def plot_training_curves(history, save_dir):
     # Revenue curve
     ax = axes[0, 1]
     revenues = history["episode_revenues"]
-    ax.plot(revenues, alpha=0.2, color="#27AE60", linewidth=0.5)
-    ax.plot(smooth(revenues), color="#27AE60", linewidth=2, label="Smoothed")
+    ax.plot(revenues, alpha=0.15, color="#27AE60", linewidth=0.5)
+    ax.plot(smooth(revenues, window), color="#27AE60", linewidth=2, label=f"Smoothed ({window}-ep)")
+    if has_greedy:
+        g_rev = [g["revenue"] for g in greedy_eval]
+        ax.plot(g_eps, g_rev, "o-", color="#E74C3C", linewidth=2, markersize=4, label="Greedy eval")
     ax.set_xlabel("Episode")
     ax.set_ylabel("Revenue ($)")
     ax.set_title("Episode Revenue")
@@ -72,8 +91,11 @@ def plot_training_curves(history, save_dir):
     # Waste rate curve
     ax = axes[1, 0]
     wastes = [w * 100 for w in history["episode_wastes"]]
-    ax.plot(wastes, alpha=0.2, color="#E74C3C", linewidth=0.5)
-    ax.plot(smooth(wastes), color="#E74C3C", linewidth=2, label="Smoothed")
+    ax.plot(wastes, alpha=0.15, color="#E74C3C", linewidth=0.5)
+    ax.plot(smooth(wastes, window), color="#E74C3C", linewidth=2, label=f"Smoothed ({window}-ep)")
+    if has_greedy:
+        g_waste = [g["waste"] * 100 for g in greedy_eval]
+        ax.plot(g_eps, g_waste, "o-", color="#1B4F72", linewidth=2, markersize=4, label="Greedy eval")
     ax.set_xlabel("Episode")
     ax.set_ylabel("Waste Rate (%)")
     ax.set_title("Episode Waste Rate")
@@ -83,8 +105,11 @@ def plot_training_curves(history, save_dir):
     # Clearance rate curve
     ax = axes[1, 1]
     clearance = [c * 100 for c in history["episode_clearance"]]
-    ax.plot(clearance, alpha=0.2, color="#8E44AD", linewidth=0.5)
-    ax.plot(smooth(clearance), color="#8E44AD", linewidth=2, label="Smoothed")
+    ax.plot(clearance, alpha=0.15, color="#8E44AD", linewidth=0.5)
+    ax.plot(smooth(clearance, window), color="#8E44AD", linewidth=2, label=f"Smoothed ({window}-ep)")
+    if has_greedy:
+        g_clear = [g["clearance"] * 100 for g in greedy_eval]
+        ax.plot(g_eps, g_clear, "o-", color="#E74C3C", linewidth=2, markersize=4, label="Greedy eval")
     ax.set_xlabel("Episode")
     ax.set_ylabel("Clearance Rate (%)")
     ax.set_title("Episode Clearance Rate")
@@ -104,6 +129,8 @@ def plot_comparison_bars(eval_results, save_dir):
     product = eval_results["product"]
     step_hours = eval_results.get("step_hours", 4)
     suffix = f"{product}_{step_hours}h"
+    if eval_results.get("use_per", False):
+        suffix += "_per"
 
     names = [r["policy_name"] for r in results]
     revenues = [r["mean_revenue"] for r in results]
@@ -170,6 +197,8 @@ def plot_action_distributions(eval_results, save_dir):
     product = eval_results["product"]
     step_hours = eval_results.get("step_hours", 4)
     suffix = f"{product}_{step_hours}h"
+    if eval_results.get("use_per", False):
+        suffix += "_per"
 
     # Derive discount labels from saved metadata (fallback to 6-level default)
     discount_levels = eval_results.get("discount_levels", [0.20, 0.30, 0.40, 0.50, 0.60, 0.70])
@@ -216,10 +245,12 @@ def plot_action_distributions(eval_results, save_dir):
     print(f"  Saved: {path}")
 
 
-def generate_all_plots(product="salad_mix", step_hours=4, save_dir="results"):
+def generate_all_plots(product="salad_mix", step_hours=4, save_dir="results", use_per=False):
     """Generate all visualization plots."""
     suffix = f"{product}_{step_hours}h"
-    print(f"\n  Generating visualizations for: {product} ({step_hours}h steps)")
+    if use_per:
+        suffix += "_per"
+    print(f"\n  Generating visualizations for: {product} ({step_hours}h steps{', PER' if use_per else ''})")
     print(f"  {'='*50}")
 
     # Training curves
@@ -250,5 +281,6 @@ if __name__ == "__main__":
     parser.add_argument("--step-hours", type=int, default=4, choices=[2, 4],
                         help="Hours per decision step (2 or 4)")
     parser.add_argument("--save-dir", type=str, default="results")
+    parser.add_argument("--per", action="store_true", help="Look for PER result files")
     args = parser.parse_args()
-    generate_all_plots(product=args.product, step_hours=args.step_hours, save_dir=args.save_dir)
+    generate_all_plots(product=args.product, step_hours=args.step_hours, save_dir=args.save_dir, use_per=args.per)

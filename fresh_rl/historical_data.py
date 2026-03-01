@@ -129,9 +129,13 @@ class HistoricalDataGenerator:
 
         return transitions
 
-    def fill_buffer(self, buffer, n_episodes: int, initial_priority: float = 5.0):
+    def fill_buffer(self, buffer, n_episodes: int, initial_priority: float = 5.0, agent=None):
         """
         Generate historical data and push into a replay buffer.
+
+        If an agent is provided, transitions are pushed via agent.store_transition()
+        so that reward shaping is applied consistently. Otherwise falls back to
+        buffer.push() with raw rewards.
 
         For PrioritizedReplayBuffer, temporarily sets max_priority to
         initial_priority so historical data gets high initial sampling weight.
@@ -144,6 +148,8 @@ class HistoricalDataGenerator:
             Number of historical episodes to generate.
         initial_priority : float
             Priority for historical transitions (PER only).
+        agent : DQNAgent or None
+            If provided, use agent.store_transition() to apply reward shaping.
 
         Returns
         -------
@@ -158,8 +164,11 @@ class HistoricalDataGenerator:
             old_max = buffer.max_priority
             buffer.max_priority = initial_priority
 
-        for t in transitions:
-            buffer.push(*t)
+        for state, action, reward, next_state, done, next_action_mask in transitions:
+            if agent is not None:
+                agent.store_transition(state, action, reward, next_state, done, next_action_mask)
+            else:
+                buffer.push(state, action, reward, next_state, done, next_action_mask)
 
         if has_per:
             buffer.max_priority = old_max

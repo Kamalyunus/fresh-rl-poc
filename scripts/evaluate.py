@@ -75,7 +75,7 @@ def evaluate_policy(env, policy, n_episodes=200, seed=42, is_dqn=False):
     }
 
 
-def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, save_dir="results"):
+def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, save_dir="results", use_per=False):
     """Run full evaluation comparing DQN against all baselines."""
     os.makedirs(save_dir, exist_ok=True)
 
@@ -83,6 +83,8 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
     state_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
     suffix = f"{product}_{step_hours}h"
+    if use_per:
+        suffix += "_per"
 
     print(f"\n{'='*75}")
     print(f"  Markdown Channel RL — Evaluation: DQN vs Baselines")
@@ -95,6 +97,7 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
     # Load trained agents
     results = []
     agent_variants = []
+    per_label = " + PER" if use_per else ""
 
     # Try loading DQN (no shaping)
     agent_path = os.path.join(save_dir, f"best_agent_{suffix}.pkl")
@@ -102,7 +105,7 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
         agent = DQNAgent(state_dim=state_dim, n_actions=n_actions, seed=seed)
         agent.load(agent_path)
         agent.epsilon = 0.0
-        agent.name = "DQN Agent"
+        agent.name = f"DQN Agent{per_label}"
         agent_variants.append(agent)
 
     # Try loading DQN (with shaping)
@@ -111,7 +114,7 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
         agent_shaped = DQNAgent(state_dim=state_dim, n_actions=n_actions, reward_shaping=True, seed=seed)
         agent_shaped.load(agent_path_shaped)
         agent_shaped.epsilon = 0.0
-        agent_shaped.name = "DQN + Reward Shaping"
+        agent_shaped.name = f"DQN + Shaping{per_label}"
         agent_variants.append(agent_shaped)
 
     # Baselines
@@ -138,7 +141,7 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
     print(f"  {'-'*75}")
 
     results_sorted = sorted(results, key=lambda x: x["mean_reward"], reverse=True)
-    dqn_names = {"DQN Agent", "DQN + Reward Shaping"}
+    dqn_names = {v.name for v in agent_variants}
     for r in results_sorted:
         marker = " *" if r["policy_name"] in dqn_names else "  "
         print(
@@ -173,6 +176,7 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
         "n_actions": int(n_actions),
         "discount_levels": env.DISCOUNT_LEVELS.tolist(),
         "n_episodes": n_episodes,
+        "use_per": use_per,
         "seed": seed,
         "results": results_sorted,
         "timestamp": datetime.now().isoformat(),
@@ -193,6 +197,7 @@ if __name__ == "__main__":
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=str, default="results")
+    parser.add_argument("--per", action="store_true", help="Look for PER-trained agent models")
     args = parser.parse_args()
 
     run_evaluation(
@@ -201,4 +206,5 @@ if __name__ == "__main__":
         n_episodes=args.episodes,
         seed=args.seed,
         save_dir=args.save_dir,
+        use_per=args.per,
     )

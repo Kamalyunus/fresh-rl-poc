@@ -144,6 +144,12 @@ class NumpyMLP:
         for i in range(len(self.params)):
             np.copyto(self.params[i], other.params[i])
 
+    def soft_update_from(self, other, tau: float):
+        """Polyak averaging: target = tau * online + (1 - tau) * target."""
+        for i in range(len(self.params)):
+            self.params[i] *= (1.0 - tau)
+            self.params[i] += tau * other.params[i]
+
 
 class DQNAgent:
     """
@@ -170,6 +176,7 @@ class DQNAgent:
         batch_size: int = 32,
         target_update_freq: int = 100,
         reward_shaping: bool = False,
+        waste_cost_scale: float = None,
         seed: int = None,
         use_per: bool = False,
         per_alpha: float = 0.6,
@@ -177,6 +184,8 @@ class DQNAgent:
         per_beta_end: float = 1.0,
         per_beta_anneal_steps: int = None,
         per_epsilon: float = 1e-5,
+        double_dqn: bool = True,
+        soft_target_tau: float = None,
     ):
         self.n_actions = n_actions
         self.gamma = gamma
@@ -186,7 +195,10 @@ class DQNAgent:
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
         self.reward_shaping = reward_shaping
+        self.waste_cost_scale = waste_cost_scale
         self.use_per = use_per
+        self.double_dqn = double_dqn
+        self.soft_target_tau = soft_target_tau
 
         if seed is not None:
             np.random.seed(seed)
@@ -236,22 +248,31 @@ class DQNAgent:
 
     def _shape_reward(self, state, action, reward, next_state):
         """
-        Potential-based reward shaping using urgency signal.
+        Potential-based reward shaping using cost-aware quadratic urgency.
 
-        Phi(s) = -urgency * 5.0
-        where urgency = inventory_normalized * (1.0 - hours_remaining_normalized)
+        Phi(s) = -inventory_frac * waste_cost_scale * (1 + time_pressure^2)
 
-        Penalizes high inventory with little time remaining.
+        where:
+            inventory_frac = normalized inventory remaining (state[1])
+            time_pressure = 1 - hours_remaining_norm (state[0])
+            waste_cost_scale = cost_per_unit * waste_penalty_multiplier * initial_inventory
+
+        The scale is derived from the environment's actual waste penalty so
+        it generalizes across SKUs without per-product tuning. Quadratic
+        time pressure makes the last steps matter much more than early ones.
+
         Preserves optimal policy (Ng et al., 1999).
         """
         if not self.reward_shaping:
             return reward
 
+        scale = self.waste_cost_scale if self.waste_cost_scale is not None else 5.0
+
         def potential(s):
             hours_remaining_norm = s[0]  # already normalized
-            inventory_norm = s[1]         # already normalized
-            urgency = inventory_norm * (1.0 - hours_remaining_norm)
-            return -urgency * 5.0
+            inventory_norm = s[1]        # already normalized
+            time_pressure = 1.0 - hours_remaining_norm
+            return -inventory_norm * scale * (1.0 + time_pressure ** 2)
 
         phi_s = potential(state)
         phi_s_next = potential(next_state)
@@ -282,11 +303,21 @@ class DQNAgent:
             is_weights = None
 
         # Compute target Q-values with action masking
-        next_q = self.target_network.predict(next_states)
-        # Mask invalid next actions with -inf
-        masked_next_q = next_q.copy()
-        masked_next_q[~next_action_masks] = -np.inf
-        max_next_q = np.max(masked_next_q, axis=1)
+        if self.double_dqn:
+            # Double DQN: online network selects action, target network evaluates
+            online_next_q = self.q_network.predict(next_states)
+            masked_online = online_next_q.copy()
+            masked_online[~next_action_masks] = -np.inf
+            best_next_actions = np.argmax(masked_online, axis=1)
+
+            target_next_q = self.target_network.predict(next_states)
+            max_next_q = target_next_q[np.arange(len(best_next_actions)), best_next_actions]
+        else:
+            # Vanilla DQN: target network selects and evaluates
+            next_q = self.target_network.predict(next_states)
+            masked_next_q = next_q.copy()
+            masked_next_q[~next_action_masks] = -np.inf
+            max_next_q = np.max(masked_next_q, axis=1)
 
         # Guard against all-masked edge case (terminal states)
         max_next_q = np.where(np.isinf(max_next_q), 0.0, max_next_q)
@@ -309,9 +340,13 @@ class DQNAgent:
         if self.use_per and per_indices is not None:
             self.replay_buffer.update_priorities(per_indices, td_errors)
 
-        # Update target network periodically
+        # Update target network
         self.train_step += 1
-        if self.train_step % self.target_update_freq == 0:
+        if self.soft_target_tau is not None:
+            # Soft update (Polyak averaging) every step
+            self.target_network.soft_update_from(self.q_network, self.soft_target_tau)
+        elif self.train_step % self.target_update_freq == 0:
+            # Hard copy periodically
             self.target_network.copy_from(self.q_network)
 
         return loss

@@ -20,7 +20,7 @@ from fresh_rl.dqn_agent import DQNAgent
 
 
 def train(
-    n_episodes: int = 500,
+    n_episodes: int = 1000,
     product: str = "salad_mix",
     step_hours: int = 4,
     reward_shaping: bool = False,
@@ -32,6 +32,9 @@ def train(
     prefill_baselines: dict = None,
     warmup_steps: int = 0,
     warmup_epsilon: float = None,
+    double_dqn: bool = True,
+    soft_target_tau: float = 0.005,
+    shaping_ratio: float = 0.2,
 ):
     """Train a DQN agent and save results."""
 
@@ -47,6 +50,13 @@ def train(
     if use_per:
         suffix += "_per"
 
+    # Compute waste cost scale: normalize relative to revenue scale
+    revenue_scale = env.base_price * env.initial_inventory
+    waste_cost_scale = shaping_ratio * revenue_scale
+
+    # Epsilon decay: slower for 2h mode (more steps per episode)
+    epsilon_decay = 0.998 if step_hours == 2 else 0.997
+
     print(f"{'='*60}")
     print(f"  Markdown Channel RL — Training DQN Agent")
     print(f"{'='*60}")
@@ -58,7 +68,10 @@ def train(
     print(f"  State dim:         {state_dim}")
     print(f"  Actions:           {n_actions} ({list(env.DISCOUNT_LEVELS)})")
     print(f"  Episodes:          {n_episodes}")
-    print(f"  Reward shaping:    {reward_shaping}")
+    print(f"  Reward shaping:    {reward_shaping}" +
+          (f" (ratio={shaping_ratio}, scale={waste_cost_scale:.1f})" if reward_shaping else ""))
+    print(f"  Double DQN:        {double_dqn}")
+    print(f"  Soft target tau:   {soft_target_tau}")
     print(f"  PER:               {use_per}")
     if prefill:
         print(f"  Pre-fill:          {prefill_episodes} episodes")
@@ -67,9 +80,6 @@ def train(
             print(f"  Warm-up epsilon:   {warmup_epsilon}")
     print(f"  Seed:              {seed}")
     print(f"{'='*60}\n")
-
-    # Epsilon decay: slower for 2h mode (more steps per episode)
-    epsilon_decay = 0.998 if step_hours == 2 else 0.997
 
     # Create agent
     agent = DQNAgent(
@@ -85,8 +95,11 @@ def train(
         batch_size=32,
         target_update_freq=50,
         reward_shaping=reward_shaping,
+        waste_cost_scale=waste_cost_scale,
         seed=seed,
         use_per=use_per,
+        double_dqn=double_dqn,
+        soft_target_tau=soft_target_tau,
     )
 
     # Pre-fill phase: load historical data into replay buffer
@@ -103,6 +116,7 @@ def train(
             agent.replay_buffer,
             n_episodes=prefill_episodes,
             initial_priority=5.0,
+            agent=agent,
         )
         print(f"  [PRE-FILL] Added {n_transitions} transitions to buffer\n")
 
@@ -130,7 +144,35 @@ def train(
     episode_revenues = []
     episode_wastes = []
     episode_clearance = []
+    greedy_eval_episodes = []  # (episode_idx, mean_reward, mean_revenue, mean_waste, mean_clearance)
     best_reward = -float("inf")
+
+    # Greedy eval frequency: every 50 episodes, run 20 greedy episodes
+    eval_freq = 50
+    eval_n = 20
+
+    def _greedy_eval():
+        """Run greedy policy (epsilon=0) and return mean metrics."""
+        eval_env = MarkdownProductEnv(product_name=product, step_hours=step_hours, seed=seed + 10000)
+        old_eps = agent.epsilon
+        agent.epsilon = 0.0
+        eval_rewards, eval_revenues, eval_wastes, eval_clears = [], [], [], []
+        for _ in range(eval_n):
+            obs_e, _ = eval_env.reset()
+            total_r = 0.0
+            done_e = False
+            while not done_e:
+                a = agent.select_action(obs_e, action_mask=eval_env.action_masks())
+                obs_e, r, term, trunc, info_e = eval_env.step(a)
+                done_e = term or trunc
+                total_r += r
+            eval_rewards.append(total_r)
+            stats_e = info_e.get("episode_stats", {})
+            eval_revenues.append(stats_e.get("total_revenue", 0))
+            eval_wastes.append(stats_e.get("waste_rate", 0))
+            eval_clears.append(stats_e.get("clearance_rate", 0))
+        agent.epsilon = old_eps
+        return np.mean(eval_rewards), np.mean(eval_revenues), np.mean(eval_wastes), np.mean(eval_clears)
 
     for ep in range(n_episodes):
         obs, _ = env.reset()
@@ -167,8 +209,11 @@ def train(
             best_reward = total_reward
             agent.save(os.path.join(save_dir, f"best_agent_{suffix}.pkl"))
 
-        # Logging
-        if (ep + 1) % 50 == 0 or ep == 0:
+        # Periodic greedy evaluation + logging
+        if (ep + 1) % eval_freq == 0 or ep == 0:
+            g_reward, g_revenue, g_waste, g_clear = _greedy_eval()
+            greedy_eval_episodes.append((ep, g_reward, g_revenue, g_waste, g_clear))
+
             recent_rewards = episode_rewards[-50:]
             recent_revenue = episode_revenues[-50:]
             recent_waste = episode_wastes[-50:]
@@ -179,7 +224,8 @@ def train(
                 f"Revenue: ${np.mean(recent_revenue):7.1f} | "
                 f"Waste: {np.mean(recent_waste)*100:5.1f}% | "
                 f"Clear: {np.mean(recent_clear)*100:5.1f}% | "
-                f"Eps: {agent.epsilon:.3f}"
+                f"Eps: {agent.epsilon:.3f} | "
+                f"Greedy: {g_reward:6.1f}"
             )
 
     # Save final agent
@@ -193,7 +239,10 @@ def train(
         "discount_levels": env.DISCOUNT_LEVELS.tolist(),
         "n_episodes": n_episodes,
         "reward_shaping": reward_shaping,
+        "shaping_ratio": shaping_ratio,
         "use_per": use_per,
+        "double_dqn": double_dqn,
+        "soft_target_tau": soft_target_tau,
         "prefill": prefill,
         "prefill_episodes": prefill_episodes if prefill else 0,
         "warmup_steps": warmup_steps,
@@ -202,6 +251,10 @@ def train(
         "episode_revenues": episode_revenues,
         "episode_wastes": episode_wastes,
         "episode_clearance": episode_clearance,
+        "greedy_eval": [
+            {"episode": e, "reward": r, "revenue": rev, "waste": w, "clearance": c}
+            for e, r, rev, w, c in greedy_eval_episodes
+        ],
         "best_reward": best_reward,
         "timestamp": datetime.now().isoformat(),
     }
@@ -220,7 +273,7 @@ def train(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train DQN agent for markdown channel discounting")
-    parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
+    parser.add_argument("--episodes", type=int, default=1000, help="Number of training episodes")
     parser.add_argument("--product", type=str, default="salad_mix",
                         choices=["salad_mix", "fresh_chicken", "yogurt", "bakery_bread", "sushi"])
     parser.add_argument("--step-hours", type=int, default=4, choices=[2, 4],
@@ -228,6 +281,12 @@ if __name__ == "__main__":
     parser.add_argument("--reward-shaping", action="store_true", help="Enable reward shaping")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=str, default="results")
+
+    # DQN variants
+    parser.add_argument("--no-double-dqn", action="store_true",
+                        help="Disable Double DQN (enabled by default)")
+    parser.add_argument("--soft-target-tau", type=float, default=0.005,
+                        help="Soft target update rate (0 = hard updates only)")
 
     # PER and pre-fill options
     parser.add_argument("--per", action="store_true", help="Enable Prioritized Experience Replay")
@@ -239,6 +298,8 @@ if __name__ == "__main__":
                         help="Gradient steps on buffered data before online training")
     parser.add_argument("--warmup-epsilon", type=float, default=None,
                         help="Starting epsilon after warmup (default: use standard decay)")
+    parser.add_argument("--shaping-ratio", type=float, default=0.2,
+                        help="Shaping strength relative to revenue scale (default: 0.2)")
 
     args = parser.parse_args()
 
@@ -254,4 +315,7 @@ if __name__ == "__main__":
         prefill_episodes=args.prefill_episodes,
         warmup_steps=args.warmup_steps,
         warmup_epsilon=args.warmup_epsilon,
+        double_dqn=not args.no_double_dqn,
+        soft_target_tau=args.soft_target_tau if args.soft_target_tau > 0 else None,
+        shaping_ratio=args.shaping_ratio,
     )
