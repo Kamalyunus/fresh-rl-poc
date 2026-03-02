@@ -1080,3 +1080,42 @@ Shaping is neutral/noise when:
 | Projected clearance leaking simulator data | Initial implementation used demand model internals (elasticity, intraday pattern) — had to hotfix to velocity-based `(recent_velocity * remaining_steps) / inventory` |
 | Pooled training — bakery/meats categories | High intra-category diversity hurts pooled models most (bakery 62%, meats 73%). A single model can't fully specialize for very different products in the same category |
 | Old TL but not pooled TL | The difference is product identity: 10-dim pre-training (v1.3) → negative transfer; 14-dim pre-training with product features (v2.1) → +9pp improvement. Observable features in the state are the key enabler |
+
+---
+
+## Iteration 18: Priority Subset — Tau Schedule, TL Warmup Skip, Mixed Prefill (v3.0)
+
+**Changes** (3 low-risk improvements, no architecture changes):
+
+### 1. Tau warming schedule
+- Soft target update rate (`tau`) now supports linear warmup: start conservative (`tau_start=0.005`), warm to faster sync (`tau_end`) over `tau_warmup_steps` gradient steps.
+- Hypothesis: early training benefits from stable targets (low tau), but later training converges faster with higher tau once Q-values stabilize.
+- New params: `--tau-start`, `--tau-end`, `--tau-warmup-steps` (all default to current behavior: constant 0.005).
+- Files: `dqn_agent.py` (constructor, `_current_tau()`, `train_step_fn()`, `save()`, `load()`), `train.py`, `run_portfolio.py`, `deployment/config.py`, `deployment/batch_train.py`.
+
+### 2. Reduced warmup for transfer learning
+- When `pretrained_path` is set, warmup steps are automatically reduced to 0 (overridable via `--tl-warmup-steps`).
+- Rationale: warmup gradient steps on prefill data pull pretrained weights back toward baseline behavior, undoing the benefit of transfer learning.
+- New param: `--tl-warmup-steps` (default: skip warmup entirely when TL is active).
+- Files: `train.py`, `run_portfolio.py`.
+
+### 3. Mixed baseline prefill (ImmediateDeepDiscount)
+- Added `ImmediateDeepDiscount` (always pick deepest discount) to the default prefill baseline mix at 5% weight.
+- Rebalanced: `backloaded_progressive` reduced from 35% → 30%, all others unchanged.
+- Rationale: more diverse initial experiences — the agent sees the extreme "always deep" policy, which provides useful negative examples (high revenue but destroys margin) and positive examples (high clearance rate).
+- Files: `historical_data.py` (imports, `DEFAULT_BASELINE_MIX`, `get_baseline_by_name()`).
+
+**Recommended run command** (v3.0 full portfolio test with tau schedule):
+```bash
+python scripts/run_portfolio.py --pooled-tl \
+    --pooled-model-dir results/portfolio_v2_pooled \
+    --episodes 5000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000
+```
+
+**Results**: *(to be filled after running)*
+
+**Baseline**: v2.1 = 142/150 (95%) beats-baseline

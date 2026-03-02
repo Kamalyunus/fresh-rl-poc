@@ -9,6 +9,7 @@ pre-fill replay buffers for warm-starting DQN training.
 import numpy as np
 from fresh_rl.environment import MarkdownProductEnv
 from fresh_rl.baselines import (
+    ImmediateDeepDiscount,
     LinearProgressive,
     BackloadedProgressive,
     DemandResponsive,
@@ -19,10 +20,11 @@ from fresh_rl.baselines import (
 # Default baseline mix simulating realistic retailer behavior
 DEFAULT_BASELINE_MIX = {
     "linear_progressive": 0.15,
-    "backloaded_progressive": 0.35,
+    "backloaded_progressive": 0.30,
     "demand_responsive": 0.20,
     "fixed_20": 0.20,
     "fixed_40": 0.10,
+    "immediate_deep": 0.05,
 }
 
 
@@ -44,6 +46,7 @@ def get_baseline_by_name(name: str, n_actions: int = 6, seed: int = None):
         "demand_responsive": lambda: DemandResponsive(n_actions=n_actions),
         "fixed_20": lambda: FixedMarkdown(discount_idx=0, name="Fixed 20%", n_actions=n_actions),
         "fixed_40": lambda: FixedMarkdown(discount_idx=idx_40, name="Fixed 40%", n_actions=n_actions),
+        "immediate_deep": lambda: ImmediateDeepDiscount(n_actions=n_actions),
     }
 
     if name not in mapping:

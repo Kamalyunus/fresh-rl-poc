@@ -41,6 +41,9 @@ from deployment.config import (
     PER_BETA_START,
     PER_EPSILON,
     STATE_DIM,
+    TAU_END,
+    TAU_START,
+    TAU_WARMUP_STEPS,
     TRAINING_STEPS_PER_SESSION,
     TRANSFER_EPSILON,
     USE_PER,
@@ -180,6 +183,9 @@ def train_single_sku(
         per_epsilon=PER_EPSILON,
         n_step=N_STEP,
         hold_action_prob=HOLD_ACTION_PROB,
+        tau_start=TAU_START,
+        tau_end=TAU_END,
+        tau_warmup_steps=TAU_WARMUP_STEPS,
     )
 
     if os.path.exists(checkpoint_path):

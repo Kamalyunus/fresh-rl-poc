@@ -124,6 +124,9 @@ class DQNAgent:
         per_epsilon: float = 1e-5,
         n_step: int = 1,
         hold_action_prob: float = 0.0,
+        tau_start: float = 0.005,
+        tau_end: float = 0.005,
+        tau_warmup_steps: int = 0,
     ):
         self.n_actions = n_actions
         self.gamma = gamma
@@ -136,7 +139,9 @@ class DQNAgent:
         self.waste_cost_scale = waste_cost_scale
         self.hold_action_prob = hold_action_prob
         self.use_per = use_per
-        self.tau = 0.005
+        self.tau_start = tau_start
+        self.tau_end = tau_end
+        self.tau_warmup_steps = tau_warmup_steps
 
         if seed is not None:
             np.random.seed(seed)
@@ -191,6 +196,13 @@ class DQNAgent:
                 nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
                 nn.init.zeros_(layer.bias)
         return net
+
+    def _current_tau(self):
+        """Compute current tau via linear warmup schedule."""
+        if self.tau_warmup_steps <= 0:
+            return self.tau_end
+        progress = min(self.train_step / max(self.tau_warmup_steps, 1), 1.0)
+        return self.tau_start + (self.tau_end - self.tau_start) * progress
 
     def select_action(self, state, action_mask=None, env=None):
         """Epsilon-greedy action selection over valid actions only."""
@@ -326,9 +338,10 @@ class DQNAgent:
 
         # Soft target update (Polyak averaging) every step
         self.train_step += 1
+        tau = self._current_tau()
         with torch.no_grad():
             for tp, p in zip(self.target_network.parameters(), self.q_network.parameters()):
-                tp.data.mul_(1.0 - self.tau).add_(self.tau * p.data)
+                tp.data.mul_(1.0 - tau).add_(tau * p.data)
 
         return loss_val
 
@@ -346,6 +359,9 @@ class DQNAgent:
             "train_step": self.train_step,
             "losses": self.losses[-2000:],
             "episode_rewards": self.episode_rewards,
+            "tau_start": self.tau_start,
+            "tau_end": self.tau_end,
+            "tau_warmup_steps": self.tau_warmup_steps,
         }
         torch.save(data, path)
 
@@ -360,6 +376,9 @@ class DQNAgent:
         self.train_step = data["train_step"]
         self.losses = data.get("losses", [])
         self.episode_rewards = data.get("episode_rewards", [])
+        self.tau_start = data.get("tau_start", 0.005)
+        self.tau_end = data.get("tau_end", 0.005)
+        self.tau_warmup_steps = data.get("tau_warmup_steps", 0)
 
     def load_pretrained(self, path):
         """Load only network weights from a pre-trained agent (no optimizer/epsilon/history)."""

@@ -42,6 +42,9 @@ EPSILON_START = 0.10   # production: warm-started, lower than POC
 EPSILON_END = 0.02
 EPSILON_DECAY = 0.999
 TAU = 0.005
+TAU_START = 0.005
+TAU_END = 0.005
+TAU_WARMUP_STEPS = 0
 HOLD_ACTION_PROB = 0.5
 
 # ── Reward constants (must match env.step()) ──────────────────────────────

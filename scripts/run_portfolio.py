@@ -168,6 +168,9 @@ def _train_category_pooled(
     buffer_size=10000,
     n_step=1,
     hold_action_prob=0.0,
+    tau_start=0.005,
+    tau_end=0.005,
+    tau_warmup_steps=0,
 ):
     """Train plain + shaped pooled DQN for one category, evaluate per-SKU."""
     from fresh_rl.pooled_env import PooledCategoryEnv, pooled_prefill
@@ -218,6 +221,9 @@ def _train_category_pooled(
             use_per=use_per,
             n_step=n_step,
             hold_action_prob=hold_action_prob,
+            tau_start=tau_start,
+            tau_end=tau_end,
+            tau_warmup_steps=tau_warmup_steps,
         )
 
     results = []
@@ -396,6 +402,10 @@ def _run_single_product(
     pooled_tl_plain_path: str = None,
     pooled_tl_shaped_path: str = None,
     augment_state: bool = False,
+    tau_start: float = 0.005,
+    tau_end: float = 0.005,
+    tau_warmup_steps: int = 0,
+    tl_warmup_steps: int = None,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -437,6 +447,10 @@ def _run_single_product(
         hold_action_prob=hold_action_prob,
         augment_state=augment_state,
         inventory_mult=inventory_mult,
+        tau_start=tau_start,
+        tau_end=tau_end,
+        tau_warmup_steps=tau_warmup_steps,
+        tl_warmup_steps=tl_warmup_steps,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -793,6 +807,18 @@ def main():
     parser.add_argument("--hold-action-prob", type=float, default=0.0,
                         help="Probability of choosing hold (current discount) during exploration (default: 0.0)")
 
+    # Tau schedule
+    parser.add_argument("--tau-start", type=float, default=0.005,
+                        help="Initial tau for soft target updates (default: 0.005)")
+    parser.add_argument("--tau-end", type=float, default=0.005,
+                        help="Final tau after warmup (default: 0.005)")
+    parser.add_argument("--tau-warmup-steps", type=int, default=0,
+                        help="Steps to linearly warm tau from tau-start to tau-end (default: 0 = constant)")
+
+    # Transfer learning warmup
+    parser.add_argument("--tl-warmup-steps", type=int, default=None,
+                        help="Override warmup steps when using pretrained weights (default: 0 = skip warmup)")
+
     # Transfer learning
     parser.add_argument("--transfer-learning", action="store_true",
                         help="Pre-train per category, then fine-tune per SKU")
@@ -901,6 +927,9 @@ def main():
             buffer_size=args.buffer_size,
             n_step=args.n_step,
             hold_action_prob=args.hold_action_prob,
+            tau_start=args.tau_start,
+            tau_end=args.tau_end,
+            tau_warmup_steps=args.tau_warmup_steps,
         )
 
         all_results = []
@@ -997,6 +1026,10 @@ def main():
             n_step=args.n_step,
             hold_action_prob=args.hold_action_prob,
             augment_state=True,
+            tau_start=args.tau_start,
+            tau_end=args.tau_end,
+            tau_warmup_steps=args.tau_warmup_steps,
+            tl_warmup_steps=args.tl_warmup_steps,
         )
 
         all_results = []
@@ -1094,6 +1127,10 @@ def main():
         buffer_size=args.buffer_size,
         n_step=args.n_step,
         hold_action_prob=args.hold_action_prob,
+        tau_start=args.tau_start,
+        tau_end=args.tau_end,
+        tau_warmup_steps=args.tau_warmup_steps,
+        tl_warmup_steps=args.tl_warmup_steps,
     )
 
     # ── Phase 1: Category pre-training (if transfer learning enabled) ────

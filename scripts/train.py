@@ -44,6 +44,10 @@ def train(
     hold_action_prob: float = 0.0,
     augment_state: bool = False,
     inventory_mult: float = 1.0,
+    tau_start: float = 0.005,
+    tau_end: float = 0.005,
+    tau_warmup_steps: int = 0,
+    tl_warmup_steps: int = None,
 ):
     """Train a DQN agent and save results."""
 
@@ -99,6 +103,8 @@ def train(
           (f" (ratio={shaping_ratio}, scale={waste_cost_scale:.1f})" if reward_shaping else ""))
     print(f"  Epsilon decay:     {epsilon_decay}")
     print(f"  PER:               {use_per}")
+    if tau_warmup_steps > 0:
+        print(f"  Tau schedule:      {tau_start} → {tau_end} over {tau_warmup_steps} steps")
     if prefill:
         print(f"  Pre-fill:          {prefill_episodes} episodes")
         print(f"  Warm-up steps:     {warmup_steps}")
@@ -127,6 +133,9 @@ def train(
         use_per=use_per,
         n_step=n_step,
         hold_action_prob=hold_action_prob,
+        tau_start=tau_start,
+        tau_end=tau_end,
+        tau_warmup_steps=tau_warmup_steps,
     )
 
     # Transfer learning: load pre-trained weights
@@ -134,7 +143,11 @@ def train(
         agent.load_pretrained(pretrained_path)
         agent.epsilon = 0.3  # Lower starting exploration for fine-tuning
         print(f"  [TRANSFER] Loaded pre-trained weights from {os.path.basename(pretrained_path)}")
-        print(f"  [TRANSFER] Fine-tuning epsilon: {agent.epsilon}\n")
+        print(f"  [TRANSFER] Fine-tuning epsilon: {agent.epsilon}")
+        # Reduce warmup for TL — pretrained weights don't need full warmup
+        original_warmup = warmup_steps
+        warmup_steps = tl_warmup_steps if tl_warmup_steps is not None else 0
+        print(f"  [TRANSFER] Warmup steps adjusted: {original_warmup} → {warmup_steps}\n")
 
     # Pre-fill phase: load historical data into replay buffer
     if prefill:
@@ -343,6 +356,18 @@ if __name__ == "__main__":
     parser.add_argument("--shaping-ratio", type=float, default=0.2,
                         help="Shaping strength relative to revenue scale (default: 0.2)")
 
+    # Tau schedule
+    parser.add_argument("--tau-start", type=float, default=0.005,
+                        help="Initial tau for soft target updates (default: 0.005)")
+    parser.add_argument("--tau-end", type=float, default=0.005,
+                        help="Final tau after warmup (default: 0.005)")
+    parser.add_argument("--tau-warmup-steps", type=int, default=0,
+                        help="Steps to linearly warm tau from tau-start to tau-end (default: 0 = constant)")
+
+    # Transfer learning warmup
+    parser.add_argument("--tl-warmup-steps", type=int, default=None,
+                        help="Override warmup steps when using pretrained weights (default: 0 = skip warmup)")
+
     args = parser.parse_args()
 
     if args.list_products:
@@ -363,4 +388,8 @@ if __name__ == "__main__":
         warmup_steps=args.warmup_steps,
         warmup_epsilon=args.warmup_epsilon,
         shaping_ratio=args.shaping_ratio,
+        tau_start=args.tau_start,
+        tau_end=args.tau_end,
+        tau_warmup_steps=args.tau_warmup_steps,
+        tl_warmup_steps=args.tl_warmup_steps,
     )
