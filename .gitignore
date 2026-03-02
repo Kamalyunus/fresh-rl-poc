@@ -11,3 +11,6 @@ venv/
 dist/
 build/
 .DS_Store
+deployment/data/
+deployment/models/
+deployment/logs/
