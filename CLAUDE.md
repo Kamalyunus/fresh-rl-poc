@@ -45,9 +45,6 @@ python scripts/run_portfolio.py --pooled-tl \
 # Visualize portfolio results
 python scripts/visualize.py --portfolio results/portfolio_v21_pooled_tl/portfolio_results.json
 
-# Compare per-SKU vs pooled
-python scripts/compare_pooled_vs_persku.py
-
 # List all products
 python scripts/train.py --list-products
 ```
@@ -70,7 +67,6 @@ scripts/
   evaluate.py           — evaluate_policy() for greedy rollouts
   run_portfolio.py      — Portfolio runner (per-SKU, pooled, and pooled-TL modes)
   visualize.py          — Single-product + portfolio visualizations (9 portfolio plots)
-  compare_pooled_vs_persku.py — Cross-version comparison plots
 ```
 
 ## Key Design Patterns
