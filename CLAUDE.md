@@ -66,7 +66,7 @@ scripts/
   train.py              — Single-product training loop
   evaluate.py           — evaluate_policy() for greedy rollouts
   run_portfolio.py      — Portfolio runner (per-SKU, pooled, and pooled-TL modes)
-  visualize.py          — Single-product + portfolio visualizations (9 portfolio plots)
+  visualize.py          — Single-product + portfolio visualizations (10 portfolio plots)
 ```
 
 ## Key Design Patterns
@@ -93,7 +93,7 @@ scripts/
 ```
 results/portfolio_v21_pooled_tl/       — Best results (v2.1, 95%)
   portfolio_results.json               — All 150 SKU results
-  portfolio_*.png                      — 9 portfolio-level plots
+  portfolio_*.png                      — 10 portfolio-level plots (incl. training progress)
   {product_name}/eval_summary.json     — Per-product evaluation
 
 results/portfolio_v2_pooled/           — Pooled category models (v2, 78%)
