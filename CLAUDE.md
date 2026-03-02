@@ -88,6 +88,12 @@ scripts/
 - Hard mode: `--demand-mult 0.5 --inventory-mult 2.0` is the standard test setting (halved demand, doubled inventory).
 - All 150 products have 24h markdown windows (12h/48h removed in v1.2 as structurally unsolvable).
 
+## Documentation
+
+- **DEPLOYMENT.md** — Production deployment guide: data requirements, state vector construction, historical prefill pipeline, online RL architecture, rollout phases, safety guardrails, monitoring, and maintenance.
+- **ARCHITECTURE.md** — Technical architecture deep-dive: MDP formulation, algorithms, data structures, training pipeline.
+- **EXPERIMENTS.md** — Full experiment log (17 iterations from v1.0 to v2.1).
+
 ## Results Directory Structure
 
 ```
