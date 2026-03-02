@@ -1105,17 +1105,40 @@ Shaping is neutral/noise when:
 - Rationale: more diverse initial experiences — the agent sees the extreme "always deep" policy, which provides useful negative examples (high revenue but destroys margin) and positive examples (high clearance rate).
 - Files: `historical_data.py` (imports, `DEFAULT_BASELINE_MIX`, `get_baseline_by_name()`).
 
-**Recommended run command** (v3.0 full portfolio test with tau schedule):
+**Run command** (3000 episodes, tau schedule):
 ```bash
 python scripts/run_portfolio.py --pooled-tl \
     --pooled-model-dir results/portfolio_v2_pooled \
-    --episodes 5000 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --episodes 3000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --workers 16 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
-    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000
+    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000 \
+    --save-dir results/portfolio_v30_pooled_tl
 ```
 
-**Results**: *(to be filled after running)*
+**Results**: **141/150 (94%) beats-baseline** at 3000 episodes (82 min, 16 workers)
 
-**Baseline**: v2.1 = 142/150 (95%) beats-baseline
+| Metric | v2.1 (5000ep) | v3.0 (3000ep) | Delta |
+|--------|--------------|---------------|-------|
+| Beats baseline | 142/150 (95%) | 141/150 (94%) | -1 |
+| Shaping wins | 66/150 (44%) | 72/150 (48%) | +6 |
+| Mean shaped reward | 143.3 | 143.0 | -0.2 |
+| Runtime | ~160 min | 82 min | -49% |
+
+**Category win rates** (v3.0 / v2.1):
+| Category | v3.0 | v2.1 |
+|----------|------|------|
+| dairy | 100% (21/21) | 100% (21/21) |
+| deli_prepared | 100% (22/22) | 100% (22/22) |
+| fruits | 95% (20/21) | 95% (20/21) |
+| meats | 95% (21/22) | 91% (20/22) |
+| vegetables | 95% (20/21) | 95% (20/21) |
+| bakery | 86% (18/21) | 90% (19/21) |
+| seafood | 86% (19/22) | 91% (20/22) |
+
+**Head-to-head**: v3.0 gained 3 SKUs (blueberries_6oz, croissants_4pk, veal_cutlet), lost 4 (cinnamon_rolls_4pk, danish_pastry_4pk, fish_tacos_kit, mixed_berries_12oz). All gaps are small (< 5 reward).
+
+**9 non-winners** (all near-ties): bacon_pack (-4.5), poke_bowl (-4.7), smoked_salmon_4oz (-4.2), pretzel_rolls_6pk (-2.7), cinnamon_rolls_4pk (-1.1), fish_tacos_kit (-0.6), danish_pastry_4pk (-0.5), mixed_berries_12oz (-0.1), salad_mix_5oz (-0.1).
+
+**Takeaway**: v3.0 matches v2.1 performance with 40% fewer episodes. The tau warming schedule + TL warmup skip + mixed prefill collectively enable faster convergence without sacrificing quality. The 1pp beats-baseline gap (94% vs 95%) is within noise — mean shaped reward is essentially identical (143.0 vs 143.3). Shaping wins improved from 44% to 48%, suggesting the diverse prefill mix helps shaped agents more.
