@@ -1,0 +1,93 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+RL-based progressive markdown pricing for perishable products. Double DQN agents learn to price 150 SKUs across 7 categories on an ecommerce markdown channel, outperforming rule-based baselines on reward (revenue - waste).
+
+Two training modes:
+- **Per-SKU (v1.4)**: 150 separate models, 10-dim state, 86% beats-baseline — best absolute performance
+- **Pooled (v2)**: 7 category-level models, 14-dim state (10 base + 4 product features), 78% beats-baseline — zero-shot generalization to new SKUs
+
+## Common Commands
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Train single product
+python scripts/train.py --product salmon_fillet --episodes 5000 --step-hours 2 \
+    --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
+
+# Run per-SKU portfolio (150 models)
+python scripts/run_portfolio.py --episodes 5000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
+
+# Run pooled portfolio (7 category models)
+python scripts/run_portfolio.py --pooled --pooled-episodes-per-sku 5000 \
+    --eval-episodes 100 --step-hours 2 --per --prefill --warmup-steps 1000 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 --workers 7
+
+# Visualize portfolio results
+python scripts/visualize.py --portfolio results/portfolio_v2_pooled/portfolio_results.json
+
+# Compare per-SKU vs pooled
+python scripts/compare_pooled_vs_persku.py
+
+# List all products
+python scripts/train.py --list-products
+```
+
+## Architecture
+
+```
+fresh_rl/
+  product_catalog.py    — 150 SKUs, 7 categories, get_product_features() for pooled mode
+  environment.py        — MarkdownChannelEnv (base), MarkdownProductEnv (per-product wrapper)
+  pooled_env.py         — PooledCategoryEnv (wraps multiple product envs, 14-dim state)
+  dqn_agent.py          — Double DQN, action masking, PER, n-step, reward shaping
+  baselines.py          — 7 rule-based policies
+  historical_data.py    — Replay buffer pre-filling from baseline rollouts
+  prioritized_replay.py — PER buffer with SumTree
+  sumtree.py            — SumTree data structure
+
+scripts/
+  train.py              — Single-product training loop
+  evaluate.py           — evaluate_policy() for greedy rollouts
+  run_portfolio.py      — Portfolio runner (per-SKU and pooled modes)
+  visualize.py          — Single-product + portfolio visualizations (9 portfolio plots)
+  compare_pooled_vs_persku.py — v1.4 vs v2 comparison plots
+```
+
+## Key Design Patterns
+
+- **State space**: 10-dim (per-SKU) or 14-dim (pooled). All features normalized to [0,1]. The 4 extra pooled features are observable product attributes (price, cost fraction, inventory, pack size) — no simulator leakage.
+- **Action masking**: Progressive constraint (discounts only go deeper) enforced via boolean masks, not reward penalties. Masks propagated through replay buffer for correct TD targets.
+- **Reward shaping**: Potential-based (preserves optimal policy). Scale = `shaping_ratio * base_price * initial_inventory`. Set per-product in pooled mode via `agent.waste_cost_scale`.
+- **N-step returns**: `NStepAccumulator` sits between `store_transition()` and replay buffer. Flushes at episode boundaries. Compatible with PER and shaping.
+- **Pooled training**: `PooledCategoryEnv` holds one `MarkdownProductEnv` per SKU. `reset(options={"product": name})` switches active product. `__getattr__` delegates to active env so baselines work unchanged.
+- **Evaluation**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Same function used for both per-SKU and pooled modes.
+- **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either.
+
+## Important Constraints
+
+- Agent runs on **CPU only** (`self.device = torch.device("cpu")`). GPU was tested and found slower for the small 2-layer MLP.
+- `pack_size` uses separate RNG (`seed + 10000`) to preserve existing product parameters.
+- Transfer learning (v1.3) exists but is superseded by pooled training — TL underperforms due to no product identity in pre-training state.
+- Hard mode: `--demand-mult 0.5 --inventory-mult 2.0` is the standard test setting (halved demand, doubled inventory).
+- All 150 products have 24h markdown windows (12h/48h removed in v1.2 as structurally unsolvable).
+
+## Results Directory Structure
+
+```
+results/portfolio_v2_pooled/
+  portfolio_results.json          — All 150 SKU results
+  portfolio_*.png                 — 9 portfolio-level plots
+  _pooled_{category}/             — Category model checkpoints (.pt)
+  {product_name}/eval_summary.json — Per-product evaluation
+```
