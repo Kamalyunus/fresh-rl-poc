@@ -1194,6 +1194,181 @@ def plot_three_way_comparison(ok_results, save_dir):
     print(f"  Saved: {path}")
 
 
+def _load_training_histories(portfolio_dir, results):
+    """Load greedy eval checkpoints from per-product training history files.
+
+    Returns dict with keys 'plain' and 'shaped', each mapping product name to
+    a list of {episode, reward, waste, clearance} dicts.
+    """
+    histories = {"plain": {}, "shaped": {}}
+    for r in results:
+        product = r["product"]
+        product_dir = os.path.join(portfolio_dir, product)
+        if not os.path.isdir(product_dir):
+            continue
+        # Find training history files by scanning for matching pattern
+        for fname in os.listdir(product_dir):
+            if not fname.startswith(f"training_history_{product}_"):
+                continue
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(product_dir, fname)
+            try:
+                with open(fpath) as f:
+                    hist = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            evals = hist.get("greedy_eval", [])
+            if not evals:
+                continue
+            variant = "shaped" if "_shaped" in fname else "plain"
+            histories[variant][product] = evals
+    return histories
+
+
+def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
+    """2x2 plot showing aggregate training progress across the portfolio.
+
+    Uses greedy eval checkpoints (epsilon=0 evaluations) from per-product
+    training histories for clean, comparable learning curves.
+    """
+    histories = _load_training_histories(portfolio_dir, ok_results)
+    if not histories["plain"] and not histories["shaped"]:
+        print("  [SKIP] No training histories found for portfolio training progress plot.")
+        return
+
+    # Build per-product baseline lookup
+    baseline_by_product = {r["product"]: r["best_baseline_reward"] for r in ok_results}
+    category_by_product = {r["product"]: r["category"] for r in ok_results}
+
+    # Collect all episode numbers across all products
+    all_episodes = set()
+    for variant in ("plain", "shaped"):
+        for evals in histories[variant].values():
+            for e in evals:
+                all_episodes.add(e["episode"])
+    episodes = sorted(all_episodes)
+
+    # Aggregate per-episode stats for each variant
+    def aggregate(variant):
+        rewards, wastes, beats = [], [], []
+        for ep in episodes:
+            ep_rewards, ep_wastes, ep_beats = [], [], []
+            for product, evals in histories[variant].items():
+                # Find checkpoint matching this episode
+                for e in evals:
+                    if e["episode"] == ep:
+                        ep_rewards.append(e["reward"])
+                        ep_wastes.append(e.get("waste", 0.0))
+                        bl = baseline_by_product.get(product)
+                        if bl is not None:
+                            ep_beats.append(1 if e["reward"] > bl else 0)
+                        break
+            if ep_rewards:
+                rewards.append((np.mean(ep_rewards), np.percentile(ep_rewards, 25),
+                                np.percentile(ep_rewards, 75)))
+            else:
+                rewards.append((np.nan, np.nan, np.nan))
+            wastes.append((np.mean(ep_wastes), np.percentile(ep_wastes, 25),
+                           np.percentile(ep_wastes, 75)) if ep_wastes else (np.nan, np.nan, np.nan))
+            beats.append(np.mean(ep_beats) * 100 if ep_beats else np.nan)
+        return (np.array(rewards), np.array(wastes), np.array(beats))
+
+    agg = {}
+    for variant in ("plain", "shaped"):
+        if histories[variant]:
+            agg[variant] = aggregate(variant)
+
+    # Per-category beats-baseline curves (best of plain/shaped per product per episode)
+    categories = sorted(set(r["category"] for r in ok_results))
+    cat_colors = _get_category_colors(categories)
+    cat_beats = {cat: [] for cat in categories}
+    for ep in episodes:
+        cat_ep = {cat: [] for cat in categories}
+        for r in ok_results:
+            product = r["product"]
+            cat = r["category"]
+            bl = baseline_by_product.get(product)
+            if bl is None:
+                continue
+            best_reward = -float("inf")
+            for variant in ("plain", "shaped"):
+                for e in histories.get(variant, {}).get(product, []):
+                    if e["episode"] == ep:
+                        best_reward = max(best_reward, e["reward"])
+                        break
+            if best_reward > -float("inf"):
+                cat_ep[cat].append(1 if best_reward > bl else 0)
+        for cat in categories:
+            cat_beats[cat].append(np.mean(cat_ep[cat]) * 100 if cat_ep[cat] else np.nan)
+
+    # --- Plot ---
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Portfolio Training Progress (Greedy Eval Checkpoints)", fontsize=14, fontweight="bold")
+    variant_style = {"plain": ("#2E86C1", "Plain DQN"), "shaped": ("#E67E22", "Shaped DQN")}
+    ep_arr = np.array(episodes)
+
+    # Panel 1: Mean greedy reward
+    ax = axes[0, 0]
+    for v, (color, label) in variant_style.items():
+        if v not in agg:
+            continue
+        rewards = agg[v][0]
+        ax.plot(ep_arr, rewards[:, 0], color=color, label=label, linewidth=1.5)
+        ax.fill_between(ep_arr, rewards[:, 1], rewards[:, 2], color=color, alpha=0.15)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Mean Greedy Reward")
+    ax.set_title("Mean Greedy Reward Over Training")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2: % beating baseline
+    ax = axes[0, 1]
+    for v, (color, label) in variant_style.items():
+        if v not in agg:
+            continue
+        ax.plot(ep_arr, agg[v][2], color=color, label=label, linewidth=1.5)
+    final_pct = sum(1 for r in ok_results if r.get("beats_baseline")) / len(ok_results) * 100
+    ax.axhline(final_pct, color="gray", linestyle="--", alpha=0.5, label=f"Final: {final_pct:.0f}%")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("% Beating Baseline")
+    ax.set_title("% Products Beating Baseline Over Training")
+    ax.set_ylim(0, 105)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 3: Mean waste rate
+    ax = axes[1, 0]
+    for v, (color, label) in variant_style.items():
+        if v not in agg:
+            continue
+        wastes = agg[v][1]
+        ax.plot(ep_arr, wastes[:, 0] * 100, color=color, label=label, linewidth=1.5)
+        ax.fill_between(ep_arr, wastes[:, 1] * 100, wastes[:, 2] * 100, color=color, alpha=0.15)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Mean Waste Rate (%)")
+    ax.set_title("Mean Waste Rate Over Training")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 4: Per-category learning curves
+    ax = axes[1, 1]
+    for cat in categories:
+        ax.plot(ep_arr, cat_beats[cat], color=cat_colors[cat], label=cat, linewidth=1.2)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("% Beating Baseline")
+    ax.set_title("Per-Category % Beating Baseline")
+    ax.set_ylim(0, 105)
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_training_progress.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
 def generate_portfolio_plots(portfolio_path, save_dir=None):
     """Generate all portfolio-level visualizations from portfolio_results.json.
 
@@ -1227,7 +1402,10 @@ def generate_portfolio_plots(portfolio_path, save_dir=None):
     plot_revenue_waste_by_category(ok_results, save_dir)
     plot_category_heatmap({"results": ok_results}, save_dir)
 
-    print(f"\n  Done! 9 portfolio plots saved to {save_dir}/")
+    portfolio_dir = os.path.dirname(portfolio_path)
+    plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir)
+
+    print(f"\n  Done! 10 portfolio plots saved to {save_dir}/")
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────
