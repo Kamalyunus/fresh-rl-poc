@@ -42,6 +42,8 @@ def train(
     buffer_size: int = 10000,
     n_step: int = 1,
     hold_action_prob: float = 0.0,
+    augment_state: bool = False,
+    inventory_mult: float = 1.0,
 ):
     """Train a DQN agent and save results."""
 
@@ -52,6 +54,12 @@ def train(
     if env_overrides:
         env_kwargs.update(env_overrides)
     env = MarkdownProductEnv(**env_kwargs)
+
+    # Wrap with augmented state for pooled→per-SKU transfer learning
+    if augment_state:
+        from fresh_rl.pooled_env import AugmentedProductEnv
+        env = AugmentedProductEnv(env, product, inventory_mult=inventory_mult)
+
     state_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
 
@@ -137,6 +145,7 @@ def train(
             step_hours=step_hours,
             baseline_mix=prefill_baselines,
             seed=seed,
+            env=env if augment_state else None,
         )
         n_transitions = generator.fill_buffer(
             agent.replay_buffer,
@@ -183,6 +192,9 @@ def train(
         if env_overrides:
             eval_kwargs.update(env_overrides)
         eval_env = MarkdownProductEnv(**eval_kwargs)
+        if augment_state:
+            from fresh_rl.pooled_env import AugmentedProductEnv
+            eval_env = AugmentedProductEnv(eval_env, product, inventory_mult=inventory_mult)
         old_eps = agent.epsilon
         agent.epsilon = 0.0
         eval_rewards, eval_revenues, eval_wastes, eval_clears = [], [], [], []

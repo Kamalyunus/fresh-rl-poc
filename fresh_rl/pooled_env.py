@@ -26,6 +26,41 @@ from fresh_rl.product_catalog import (
 )
 
 
+class AugmentedProductEnv(gym.Wrapper):
+    """Wraps MarkdownProductEnv to append 4 product features (10→14 dim).
+
+    Used for pooled→per-SKU transfer learning: the per-SKU agent sees the same
+    14-dim state as the pooled model, with product features held constant.
+    """
+
+    def __init__(self, env, product_name, inventory_mult=1.0):
+        super().__init__(env)
+        self._features = get_product_features(product_name, inventory_mult)
+        base_dim = env.observation_space.shape[0]
+        self.observation_space = spaces.Box(
+            low=np.zeros(base_dim + 4, dtype=np.float32),
+            high=np.ones(base_dim + 4, dtype=np.float32),
+            dtype=np.float32,
+        )
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return np.concatenate([obs, self._features]), info
+
+    def step(self, action):
+        obs, r, term, trunc, info = self.env.step(action)
+        return np.concatenate([obs, self._features]), r, term, trunc, info
+
+    def action_masks(self):
+        return self.env.action_masks()
+
+    def __getattr__(self, name):
+        """Delegate attribute access to the wrapped env (for baselines)."""
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self.env, name)
+
+
 class PooledCategoryEnv(gym.Env):
     """Gymnasium env that pools all SKUs in a category behind a single interface.
 

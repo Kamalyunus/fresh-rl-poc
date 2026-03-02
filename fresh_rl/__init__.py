@@ -12,4 +12,4 @@ from fresh_rl.product_catalog import (
     get_categories,
     get_product_features,
 )
-from fresh_rl.pooled_env import PooledCategoryEnv
+from fresh_rl.pooled_env import PooledCategoryEnv, AugmentedProductEnv

@@ -74,12 +74,14 @@ class HistoricalDataGenerator:
         step_hours: int = 4,
         baseline_mix: dict = None,
         seed: int = None,
+        env=None,
     ):
         self.product = product
         self.step_hours = step_hours
         self.baseline_mix = baseline_mix or DEFAULT_BASELINE_MIX
         self.seed = seed
         self.rng = np.random.default_rng(seed)
+        self._env = env  # use external env if provided
 
     def generate(self, n_episodes: int):
         """
@@ -87,11 +89,14 @@ class HistoricalDataGenerator:
 
         Returns list of (state, action, reward, next_state, done, next_action_mask) tuples.
         """
-        env = MarkdownProductEnv(
-            product_name=self.product,
-            step_hours=self.step_hours,
-            seed=self.seed,
-        )
+        if self._env is not None:
+            env = self._env
+        else:
+            env = MarkdownProductEnv(
+                product_name=self.product,
+                step_hours=self.step_hours,
+                seed=self.seed,
+            )
         n_actions = env.action_space.n
 
         # Build baseline instances and weights
