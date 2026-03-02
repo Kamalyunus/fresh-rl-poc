@@ -7,14 +7,15 @@ How to take the trained RL markdown pricing agent from POC to production. Covers
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Data Requirements](#data-requirements)
-3. [State Vector Construction](#state-vector-construction)
-4. [Historical Data to Replay Buffer](#historical-data-to-replay-buffer)
-5. [Online RL Deployment Architecture](#online-rl-deployment-architecture)
-6. [Deployment Sequence](#deployment-sequence)
-7. [Safety and Guardrails](#safety-and-guardrails)
-8. [Monitoring Dashboard](#monitoring-dashboard)
-9. [Retraining and Maintenance](#retraining-and-maintenance)
+2. [Code Mapping: POC to Production](#code-mapping-poc-to-production)
+3. [Data Requirements](#data-requirements)
+4. [State Vector Construction](#state-vector-construction)
+5. [Historical Data to Replay Buffer](#historical-data-to-replay-buffer)
+6. [Online RL Deployment Architecture](#online-rl-deployment-architecture)
+7. [Deployment Sequence](#deployment-sequence)
+8. [Safety and Guardrails](#safety-and-guardrails)
+9. [Monitoring Dashboard](#monitoring-dashboard)
+10. [Retraining and Maintenance](#retraining-and-maintenance)
 
 ---
 
@@ -85,6 +86,84 @@ Every 2 hours, for each active markdown SKU:
                   |  (replay buffer +    |
                   |   gradient update)   |
                   +----------+----------+
+```
+
+---
+
+## Code Mapping: POC to Production
+
+### Reuse As-Is
+
+These modules contain the core RL algorithm and are used directly in production without modification.
+
+| Module | What It Does | Production Role |
+|--------|-------------|-----------------|
+| `fresh_rl/dqn_agent.py` | `DQNAgent`, `NStepAccumulator`, `ReplayBuffer` | Core agent: `select_action()` for inference, `store_transition()` + `train_step_fn()` for learning, `load_pretrained()` for cold start, `save()`/`load()` for checkpoints |
+| `fresh_rl/prioritized_replay.py` | `PrioritizedReplayBuffer` | Replay buffer with priority sampling |
+| `fresh_rl/sumtree.py` | `SumTree` data structure | Internal to PER buffer |
+| `fresh_rl/baselines.py` | 7 rule-based policies | `BackloadedProgressive` as fallback policy on model failure |
+| `fresh_rl/product_catalog.py` | `get_product_features()`, `CATEGORIES` | Product feature computation (state[10-13]) and normalization ranges |
+
+### Not Used in Production
+
+These modules are the simulator — they are replaced by real-world data and systems.
+
+| Module | POC Role | Production Replacement |
+|--------|----------|----------------------|
+| `fresh_rl/environment.py` | `MarkdownChannelEnv` — simulates demand, inventory, rewards | Real POS sales + WMS inventory. Constants (`DISCOUNT_LEVELS_BY_STEP`) still referenced for the action-to-discount mapping. |
+| `fresh_rl/pooled_env.py` | `PooledCategoryEnv`, `AugmentedProductEnv` — wraps simulator with 14-dim state | State constructor service builds 14-dim vector directly from live data |
+| `fresh_rl/historical_data.py` | `HistoricalDataGenerator` — generates synthetic transitions from baseline rollouts | Historical ETL pipeline converts real past sessions to transition tuples |
+
+### Scripts: POC vs Production
+
+| POC Script | What It Does | Production Equivalent |
+|-----------|-------------|----------------------|
+| `scripts/train.py` | Single-SKU training loop: prefill → warmup → online episodes against simulator | **Training service** — same loop structure, but transitions come from real outcomes instead of `env.step()`. Key functions to port: prefill logic (lines 139-156), warmup loop (lines 159-175), the per-step `store_transition()` + `train_step_fn()` pattern (lines 226-235). |
+| `scripts/run_portfolio.py` | Parallel training of 150 SKUs with `ProcessPoolExecutor` | **Orchestrator** — schedules training across SKUs. The `_train_and_eval_product()` worker function is the template for per-SKU lifecycle. Transfer learning init via `--pooled-tl` mode (loads pooled weights, wraps env for 14-dim state) maps to the cold-start path. |
+| `scripts/evaluate.py` | `evaluate_policy()` — greedy rollouts against simulator baselines | **Offline evaluation** — adapt to replay historical sessions through the model (not counterfactual, but "what would the agent have recommended?"). The function signature and metrics collection are reusable. |
+| `scripts/visualize.py` | Portfolio plots from `portfolio_results.json` | **Monitoring dashboard** — same metrics (reward, waste rate, clearance, per-category breakdown) but fed from live data instead of JSON files. |
+
+### New Code to Build
+
+These components don't exist in the POC and need to be created for production.
+
+| Component | Responsibility | Key Interfaces |
+|-----------|---------------|----------------|
+| **State constructor** | Builds 14-dim vector from live WMS/POS/clock data. Replaces `env._get_obs()` + `AugmentedProductEnv`. | Input: session state (inventory, sales history, timestamps). Output: `np.float32[14]`. See [State Vector Construction](#state-vector-construction) for exact formulas. |
+| **Historical ETL pipeline** | Converts historical markdown session CSVs/DB rows to `(s, a, r, s', done, mask)` tuples. Replaces `HistoricalDataGenerator.generate()`. | Input: session records (Section 3B format). Output: transition tuples fed to `agent.store_transition()`. See [Historical Data to Replay Buffer](#historical-data-to-replay-buffer) for pseudocode. |
+| **Pricing service** | Inference endpoint called every 2h per active session. Reads state, runs `agent.select_action()`, returns discount level. | Input: SKU + session context. Output: discount index (0-10). Wraps `DQNAgent.select_action()` with action mask enforcement and fallback. |
+| **Session manager** | Tracks active markdown sessions: step count, current discount, cumulative sales, start time. | Maintains per-session state needed by the state constructor. Replaces the `env.step_count`, `env.current_discount_idx`, `env.recent_sales` tracking that the simulator did internally. |
+| **Training service** | Receives observed outcomes, builds transitions, calls `agent.store_transition()` + `agent.train_step_fn()`. | Runs asynchronously after each 2h observation. Handles reward computation (revenue - holding - waste), action mask construction, and model checkpointing. |
+| **Markdown trigger** | Scans inventory/expiry systems for products entering markdown. Initiates new sessions. | Input: batch expiry data from WMS. Output: new session events to the pricing service. |
+| **Monitoring and alerting** | Collects metrics (reward, waste, clearance, loss, epsilon), triggers alerts on threshold violations. | See [Monitoring Dashboard](#monitoring-dashboard) for metric definitions and thresholds. |
+
+### Reuse Summary
+
+```
+POC Codebase (fresh_rl/)              Production
+================================       ================================
+dqn_agent.py ──────────────────────>   Used directly (agent core)
+prioritized_replay.py ─────────────>   Used directly (PER buffer)
+sumtree.py ────────────────────────>   Used directly (PER internals)
+baselines.py ──────────────────────>   Fallback policy only
+product_catalog.py ────────────────>   get_product_features() + ranges
+
+environment.py ─────────── X ──────>   Replaced by real world + state constructor
+pooled_env.py ──────────── X ──────>   Replaced by state constructor
+historical_data.py ─────── X ──────>   Replaced by historical ETL pipeline
+
+scripts/train.py ──────── adapt ───>   Training service (same loop, real data)
+scripts/run_portfolio.py ─ adapt ───>   Orchestrator (scheduling, TL init)
+scripts/evaluate.py ────── adapt ───>   Offline evaluation (replay-based)
+scripts/visualize.py ───── adapt ───>   Monitoring dashboard (live metrics)
+
+                           NEW         State constructor
+                           NEW         Historical ETL pipeline
+                           NEW         Pricing service (inference)
+                           NEW         Session manager
+                           NEW         Training service
+                           NEW         Markdown trigger
+                           NEW         Monitoring + alerting
 ```
 
 ---
