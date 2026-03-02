@@ -10,4 +10,6 @@ from fresh_rl.product_catalog import (
     get_product_names,
     get_profile,
     get_categories,
+    get_product_features,
 )
+from fresh_rl.pooled_env import PooledCategoryEnv

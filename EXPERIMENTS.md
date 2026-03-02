@@ -862,6 +862,86 @@ python scripts/run_portfolio.py --episodes 5000 --eval-episodes 100 \
 
 ---
 
+## Iteration 16: Pooled Category Training (v2 — 7 models for 150 SKUs)
+
+**Commit**: (v2.0)
+
+**Goal**: Train 7 category-level models instead of 150 per-SKU models by conditioning on observable product features. Unlike the failed transfer learning (v1.3, which pre-trained on 10-dim state with no product identity → per-SKU fine-tune → 150 final models), pooled training uses a single 14-dim state (10 base + 4 product features) and produces 7 final models that generalize across all SKUs in each category.
+
+**Key difference from TL (v1.3)**:
+- **TL**: category pre-train on 10-dim state (no product identity) → per-SKU fine-tune → 150 final models → 71% beats-baseline
+- **Pooled**: single model trained on 14-dim state (10 base + 4 observable product features) → 7 final models → 78% beats-baseline
+
+**Changes**:
+
+### 1. Observable product features (`product_catalog.py`)
+- Added `pack_size` attribute to `CategorySpec` (generated with separate RNG `seed+10000` to preserve existing params)
+- Added `get_product_features(product_name, inventory_mult)` returning 4-dim normalized [0,1] vector:
+  - `price_norm` — price within category range (proxies revenue scale)
+  - `cost_frac_norm` — cost fraction within range (proxies margin pressure)
+  - `inventory_norm` — inventory within range (proxies clearing difficulty)
+  - `pack_size_norm` — pack size within range (proxies purchase dynamics)
+- **No simulator leakage**: `price_elasticity` and `base_markdown_demand` excluded — agent learns demand through runtime signals (velocity, sell-through, projected clearance) + observable proxies
+
+### 2. PooledCategoryEnv (`pooled_env.py` — NEW)
+- `PooledCategoryEnv(gym.Env)`: holds one `MarkdownProductEnv` per SKU + pre-computed 4-dim product features
+- `reset(options={"product": name})` switches active product, appends features to obs (14-dim)
+- `__getattr__` delegation so baselines can access `env.step_count`, `env.inventory_remaining`, etc.
+- `pooled_prefill()`: runs `DEFAULT_BASELINE_MIX` policies through the pooled env, producing 14-dim transitions
+
+### 3. Pooled mode in portfolio runner (`run_portfolio.py`)
+- `--pooled` flag + `--pooled-episodes-per-sku` (default 2500)
+- `_train_category_pooled()`: creates PooledCategoryEnv, trains plain+shaped agents with round-robin through SKUs, evaluates all SKUs
+- Per-product `waste_cost_scale` update for shaped variant
+- 7 workers (one per category) via ProcessPoolExecutor
+
+**Setup (v2)**:
+```bash
+python scripts/run_portfolio.py --pooled --pooled-episodes-per-sku 5000 \
+    --eval-episodes 100 --step-hours 2 --per --prefill --warmup-steps 1000 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 --workers 7
+```
+
+### Results
+
+| Metric | v1.4 Per-SKU (5000ep) | v2 Pooled (5000ep/SKU) |
+|--------|----------------------|------------------------|
+| Beats best baseline | **129/150 (86%)** | 117/150 (78%) |
+| Shaping wins | 61/150 (41%) | 70/150 (47%) |
+| Models trained | 300 | 14 |
+| Runtime (~) | ~90 min (16 workers) | ~180 min (7 workers) |
+
+**Category breakdown (pooled, best of plain/shaped)**:
+
+| Category | SKUs | v2 Pooled | v1.4 Per-SKU | Delta |
+|----------|------|-----------|--------------|-------|
+| dairy | 21 | **90%** | 81% | **+9pp** |
+| deli_prepared | 22 | **86%** | 91% | -5pp |
+| vegetables | 21 | **81%** | 86% | -5pp |
+| fruits | 21 | **81%** | 86% | -5pp |
+| meats | 22 | **73%** | 91% | -18pp |
+| seafood | 22 | **73%** | 77% | -4pp |
+| bakery | 21 | **62%** | 76% | -14pp |
+
+### Analysis
+
+1. **78% beats-baseline with only 14 models**: A strong result given the model count reduction (300 → 14). The pooled model learns generalizable pricing strategies across diverse SKUs within each category.
+
+2. **Dairy outperforms per-SKU (+9pp)**: The only category where pooled beats per-SKU. Dairy has the narrowest intra-category variance — SKUs are similar enough that pooling experience across them is strictly beneficial.
+
+3. **Meats and bakery most affected**: These categories have the widest intra-category diversity (meats: $5-15 price range, bakery: $2.50-7 with 3.5-4.5 elasticity range). A single model struggles to specialize for very different products.
+
+4. **Shaping wins slightly higher (47% vs 41%)**: With a shared model handling diverse products, the shaped variant's urgency signal helps differentiate behavior across different product profiles.
+
+5. **Zero-shot generalization**: The key advantage — for any new SKU, compute its 4 product features and use the existing category model. No retraining needed.
+
+6. **Why this works but TL failed**: TL pre-trained on 10-dim state with **no product identity** — the model couldn't distinguish between a $5 ground beef and a $15 lamb chop. Pooled training includes 4 observable product features in every state, so the model explicitly knows which product it's pricing and can learn product-conditional strategies.
+
+**Learning**: **Pooled category training trades ~8pp absolute performance for 21x model reduction and zero-shot generalization to new SKUs.** The key enabler is observable product features in the state — conditioning on price, cost, inventory, and pack size lets a single model learn product-specific strategies without separate training. Best used as a warm-start for new SKUs or when maintaining 300 models is impractical; per-SKU training remains best for peak performance on a fixed catalog.
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps
@@ -894,6 +974,7 @@ Shaping is neutral/noise when:
 | Projected clearance feature (velocity-based) | Observable "will I clear at current pace?" signal — helped 24h products reach 75% beats-baseline |
 | Hold-action exploration + conservative prefill | New best overall: 52% beats-baseline (+6pp), driven by 24h product improvement |
 | Longer training (5000ep) | New best 84% beats-baseline (+3pp over 3000ep). Plain DQN reaches 86% — shaping unnecessary with enough data |
+| Pooled category training (14-dim state) | 78% beats-baseline with only 14 models (vs 300). Enables zero-shot pricing for new SKUs via observable product features |
 
 ### What didn't work / watch out for
 
@@ -911,3 +992,4 @@ Shaping is neutral/noise when:
 | N-step returns reduce shaping benefit | N-step and shaping both accelerate reward propagation — their benefits overlap, dropping shaping win rate from 57% to 47% |
 | Hold-action bias on 48h products | 48h products need *more* discounting, not less — hold bias pushed the agent in the wrong direction. 48h failure is structural (demand >> inventory), not an exploration problem |
 | Projected clearance leaking simulator data | Initial implementation used demand model internals (elasticity, intraday pattern) — had to hotfix to velocity-based `(recent_velocity * remaining_steps) / inventory` |
+| Pooled training — bakery/meats categories | High intra-category diversity hurts pooled models most (bakery 62%, meats 73%). A single model can't fully specialize for very different products in the same category |

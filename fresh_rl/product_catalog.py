@@ -27,6 +27,7 @@ class CategorySpec:
     cost_fraction_range: tuple  # (min, max) as fraction of base_price
     demand_range: tuple  # (min, max) base_markdown_demand
     inventory_range: tuple  # (min, max) initial_inventory
+    pack_size_range: tuple = (1, 1)  # (min, max) units per package
     sku_names: List[str] = field(default_factory=list)
 
 
@@ -41,6 +42,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
         cost_fraction_range=(0.45, 0.55),
         demand_range=(2.5, 5.0),
         inventory_range=(10, 25),
+        pack_size_range=(1, 4),
         sku_names=[
             "ground_beef_1lb", "chicken_breast", "pork_chop", "beef_steak_ribeye",
             "lamb_chop", "bacon_pack", "turkey_breast", "beef_roast_chuck",
@@ -58,6 +60,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
         cost_fraction_range=(0.45, 0.60),
         demand_range=(2.0, 4.0),
         inventory_range=(8, 20),
+        pack_size_range=(1, 2),
         sku_names=[
             "salmon_fillet", "shrimp_1lb", "sushi_combo_6pc", "poke_bowl",
             "lobster_tail", "tilapia_fillet", "crab_cakes_2pk", "tuna_steak",
@@ -75,6 +78,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
         cost_fraction_range=(0.30, 0.45),
         demand_range=(4.0, 8.0),
         inventory_range=(15, 35),
+        pack_size_range=(1, 4),
         sku_names=[
             "salad_mix_5oz", "spinach_bunch", "mushroom_8oz", "asparagus_bunch",
             "bell_pepper_3pk", "broccoli_crown", "cherry_tomatoes_pt", "green_beans_lb",
@@ -92,6 +96,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
         cost_fraction_range=(0.30, 0.45),
         demand_range=(4.0, 7.0),
         inventory_range=(15, 30),
+        pack_size_range=(1, 6),
         sku_names=[
             "strawberries_1lb", "blueberries_6oz", "cut_watermelon", "avocado_3pk",
             "raspberries_6oz", "mango_sliced", "grapes_red_2lb", "pineapple_chunks",
@@ -109,6 +114,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
         cost_fraction_range=(0.25, 0.40),
         demand_range=(4.0, 8.0),
         inventory_range=(15, 35),
+        pack_size_range=(1, 2),
         sku_names=[
             "yogurt_greek_plain", "milk_whole_gallon", "fresh_mozzarella",
             "cottage_cheese_16oz", "cream_cheese_8oz", "butter_unsalted",
@@ -127,6 +133,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
         cost_fraction_range=(0.30, 0.45),
         demand_range=(3.5, 6.0),
         inventory_range=(12, 25),
+        pack_size_range=(1, 12),
         sku_names=[
             "sourdough_loaf", "croissants_4pk", "bagels_6pk", "cinnamon_rolls_4pk",
             "baguette_french", "dinner_rolls_12pk", "multigrain_loaf",
@@ -145,6 +152,7 @@ CATEGORIES: Dict[str, CategorySpec] = {
         cost_fraction_range=(0.35, 0.50),
         demand_range=(2.5, 5.0),
         inventory_range=(8, 20),
+        pack_size_range=(1, 8),
         sku_names=[
             "rotisserie_chicken", "deli_sandwich_club", "soup_chicken_noodle_qt",
             "mac_and_cheese_lb", "caesar_salad_kit", "sushi_roll_california",
@@ -204,9 +212,13 @@ def generate_catalog(seed: int = 42) -> Dict[str, dict]:
 
     # Generated SKUs
     rng = np.random.default_rng(seed)
+    pack_rng = np.random.default_rng(seed + 10000)  # separate RNG for pack_size
     for cat_name, spec in CATEGORIES.items():
         for idx, sku_name in enumerate(spec.sku_names):
-            catalog[sku_name] = generate_sku_profile(spec, sku_name, idx, rng)
+            profile = generate_sku_profile(spec, sku_name, idx, rng)
+            # Add pack_size as metadata (does NOT affect env dynamics)
+            profile["_pack_size"] = int(pack_rng.uniform(*spec.pack_size_range))
+            catalog[sku_name] = profile
 
     _catalog_cache = catalog
     return catalog
@@ -238,6 +250,38 @@ def get_profile(product_name: str) -> dict:
 def get_categories() -> List[str]:
     """Return list of category names."""
     return sorted(CATEGORIES.keys())
+
+
+def get_product_features(product_name: str, inventory_mult: float = 1.0) -> np.ndarray:
+    """Return 4-dim [0,1] observable product features for state augmentation.
+
+    Features (all normalized within category ranges):
+        [0] price_norm       — base_price position in category range
+        [1] cost_frac_norm   — cost fraction position in category range
+        [2] inventory_norm   — initial_inventory (× mult) position in category range
+        [3] pack_size_norm   — pack_size position in category range
+
+    These are observable product attributes (printed on packaging, visible in
+    store systems) — no simulator leakage (elasticity, base_demand excluded).
+    """
+    catalog = generate_catalog()
+    if product_name not in catalog:
+        raise ValueError(f"Unknown product '{product_name}'")
+
+    profile = catalog[product_name]
+    cat = CATEGORIES[profile["_category"]]
+
+    def _norm(val, lo, hi):
+        return float(np.clip((val - lo) / max(hi - lo, 1e-6), 0.0, 1.0))
+
+    price_norm = _norm(profile["base_price"], *cat.price_range)
+    cost_frac = profile["cost_per_unit"] / max(profile["base_price"], 1e-6)
+    cost_frac_norm = _norm(cost_frac, *cat.cost_fraction_range)
+    inv = profile["initial_inventory"] * inventory_mult
+    inventory_norm = _norm(inv, cat.inventory_range[0], cat.inventory_range[1] * max(inventory_mult, 1.0))
+    pack_size_norm = _norm(profile.get("_pack_size", 1), *cat.pack_size_range)
+
+    return np.array([price_norm, cost_frac_norm, inventory_norm, pack_size_norm], dtype=np.float32)
 
 
 def print_catalog_summary():

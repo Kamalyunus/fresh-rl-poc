@@ -26,6 +26,7 @@ Detailed technical documentation of the reinforcement learning system for perish
 18. [Training Pipeline](#training-pipeline)
 19. [Portfolio Runner](#portfolio-runner)
 20. [Product Catalog](#product-catalog)
+21. [Pooled Category Training](#pooled-category-training)
 
 ---
 
@@ -78,14 +79,14 @@ Detailed technical documentation of the reinforcement learning system for perish
 
 ```
 product_catalog.py -----> environment.py -----> dqn_agent.py
-                               |                     |
-                               |                +----+----+
-                               |                |         |
-                               v                v         v
-                          baselines.py    sumtree.py  prioritized_replay.py
-                               |
-                               v
-                        historical_data.py
+        |                      |                     |
+        |                      |                +----+----+
+        |                      |                |         |
+        |                      v                v         v
+        |                 baselines.py    sumtree.py  prioritized_replay.py
+        |                      |
+        v                      v
+   pooled_env.py -------> historical_data.py
 ```
 
 ### Data Flow Per Training Step
@@ -142,6 +143,8 @@ The markdown pricing problem is modeled as a finite-horizon Markov Decision Proc
 **Cyclical encoding** uses sin/cos pairs so the network learns that 11pm neighbors midnight and Sunday neighbors Monday — linear floats put these maximally apart. **Sell-through rate** gives the agent a direct "am I ahead or behind pace?" signal without requiring the network to learn the division between inventory and time features. **Projected clearance** extrapolates from the observed recent sales velocity (rolling mean of last 3 steps) to estimate whether the current pace will clear remaining inventory before the deadline — a value near 1.0 means the agent can hold the current discount, while low values signal urgency to go deeper. Uses only observable data (past sales, time, inventory) with no access to demand model internals.
 
 All features are clipped to [0, 1] after normalization. This keeps the neural network's input distribution stable across products with vastly different absolute scales.
+
+**Pooled mode (14-dim)**: In pooled category training, 4 additional product features are appended: `price_norm`, `cost_frac_norm`, `inventory_norm`, `pack_size_norm`. These are static per product (constant within an episode) and enable a single model to learn product-conditional strategies. See [Pooled Category Training](#pooled-category-training).
 
 ### Action Space
 
@@ -321,26 +324,27 @@ nn.Sequential(
 )
 ```
 
-Default `hidden_dim=128` (recommended), `state_dim=10`:
+Default `hidden_dim=128`, `state_dim=10` (per-SKU) or `state_dim=14` (pooled):
 
 ```
-Input (10-dim state)
+Input (10-dim per-SKU / 14-dim pooled)
     |
     v
-[Linear: 10 -> 128] -> [ReLU]    (Layer 1)
+[Linear: state_dim -> 128] -> [ReLU]    (Layer 1)
     |
     v
-[Linear: 128 -> 128] -> [ReLU]   (Layer 2)
+[Linear: 128 -> 128] -> [ReLU]          (Layer 2)
     |
     v
-[Linear: 128 -> n_actions]       (Output)
+[Linear: 128 -> n_actions]              (Output)
     |
     v
 Q-values (11-dim for 2h mode)
 ```
 
 Total parameters (2h mode, hidden_dim=128):
-- `10*128 + 128 + 128*128 + 128 + 128*11 + 11 = 19,083`
+- Per-SKU (10-dim): `10*128 + 128 + 128*128 + 128 + 128*11 + 11 = 19,083`
+- Pooled (14-dim): `14*128 + 128 + 128*128 + 128 + 128*11 + 11 = 19,595`
 
 ### Kaiming Initialization
 
@@ -1201,6 +1205,8 @@ Phase 2: Fine-tune per SKU
 
 **Architecture compatibility**: All products share `state_dim=10` and the same `n_actions`, so weights transfer directly without any adaptation layers.
 
+**Superseded by Pooled Training (v2)**: Pooled category training addresses TL's core failure — the lack of product identity during pre-training — by including 4 observable product features in the state (14-dim). This achieves 78% beats-baseline with 14 models vs TL's 71% with 300 models. See [Pooled Category Training](#pooled-category-training).
+
 **`load_pretrained()` method** (`DQNAgent`):
 - Loads only `q_network` state dict from the saved checkpoint
 - Copies those weights into both `q_network` and `target_network` (target synced)
@@ -1217,6 +1223,8 @@ Validates that the RL approach generalizes across 150 products with diverse econ
 
 ### Architecture
 
+**Per-SKU Mode** (default):
+
 ```
 scripts/run_portfolio.py
   |
@@ -1225,8 +1233,8 @@ scripts/run_portfolio.py
   +-- ProcessPoolExecutor (--workers 16)
   |     |
   |     +-- Worker 1: _run_single_product("salmon_fillet")
-  |     |     +-- Train plain DQN (5000 episodes)
-  |     |     +-- Train shaped DQN (5000 episodes)
+  |     |     +-- Train plain DQN (5000 episodes, 10-dim state)
+  |     |     +-- Train shaped DQN (5000 episodes, 10-dim state)
   |     |     +-- Evaluate both + 7 baselines (100 episodes each)
   |     |     +-- Return summary dict
   |     |
@@ -1234,22 +1242,30 @@ scripts/run_portfolio.py
   |     +-- Worker 3: ...
   |     +-- Worker N: ...
   |
-  +-- Collect results incrementally (crash recovery via JSON checkpoint)
+  +-- Collect results + generate report + 9 portfolio plots
+```
+
+**Pooled Mode** (`--pooled`):
+
+```
+scripts/run_portfolio.py --pooled
   |
-  +-- Generate aggregate report:
-  |     +-- Per-category breakdown (win rate, waste delta, revenue delta)
-  |     +-- Head-to-head vs each baseline
-  |     +-- Overall rankings
+  +-- Group products by category (7 groups of ~22 SKUs)
   |
-  +-- Generate portfolio visualizations (9 plots):
-        +-- 6-panel dashboard (reward/revenue/waste/clearance by category + scatter + histogram)
-        +-- DQN-vs-baseline scatter
-        +-- Category win rates (horizontal bars)
-        +-- Reward gap distribution (histogram)
-        +-- Per-SKU reward gaps (dot plot by category)
-        +-- Baseline difficulty analysis
-        +-- Revenue-waste comparison by category
-        +-- Three-way comparison (plain DQN vs shaped DQN vs best baseline)
+  +-- ProcessPoolExecutor (--workers 7)
+  |     |
+  |     +-- Worker 1: _train_category_pooled("meats", [22 products])
+  |     |     +-- Create PooledCategoryEnv (one env per SKU)
+  |     |     +-- Prefill with multi-product baseline rollouts (14-dim)
+  |     |     +-- Train plain DQN (episodes = 5000 * 22, round-robin, 14-dim state)
+  |     |     +-- Train shaped DQN (per-product waste_cost_scale, 14-dim state)
+  |     |     +-- Evaluate each SKU vs 7 baselines
+  |     |     +-- Return list of 22 result dicts
+  |     |
+  |     +-- Worker 2: _train_category_pooled("seafood", ...)
+  |     +-- ... (7 workers total)
+  |
+  +-- Collect results + generate report + 9 portfolio plots
 ```
 
 ### Demand and Inventory Multipliers
@@ -1276,14 +1292,15 @@ Example: `--demand-mult 0.5 --inventory-mult 2.0` halves demand and doubles inve
 
 ```python
 CategorySpec:
-  name:           str       # e.g., "seafood"
-  sku_names:      List[str] # 21-22 product names per category
-  price_range:    (min, max)
-  cost_frac_range:(min, max)
-  demand_range:   (min, max)
-  inventory_range:(min, max)
+  name:            str       # e.g., "seafood"
+  sku_names:       List[str] # 21-22 product names per category
+  price_range:     (min, max)
+  cost_frac_range: (min, max)
+  demand_range:    (min, max)
+  inventory_range: (min, max)
   elasticity_range:(min, max)
-  window_hours:   List[int] # [24] for all categories
+  window_hours:    List[int] # [24] for all categories
+  pack_size_range: (min, max) # units per package, e.g. (1, 6)
 ```
 
 Each SKU's parameters are generated with a seeded RNG for full reproducibility:
@@ -1322,9 +1339,132 @@ get_product_names(category=None) -> List[str]  # filter by category
 get_profile(product_name) -> dict              # single lookup
 get_categories() -> List[str]                  # category names
 print_catalog_summary()                        # formatted table to stdout
+get_product_features(product_name, inventory_mult=1.0) -> np.ndarray  # 4-dim [0,1] features for pooled training
 ```
 
 The catalog is generated once (cached) and provides a consistent, reproducible set of products across all experiments.
+
+### Observable Product Features
+
+`get_product_features()` returns a 4-dimensional normalized [0,1] vector used by pooled category training to condition the model on product identity:
+
+| Feature | Normalization | What it proxies |
+|---------|---------------|-----------------|
+| `price_norm` | `(price - cat.price_range[0]) / range` | Revenue scale, willingness-to-pay |
+| `cost_frac_norm` | `(cost_frac - cat.cost_fraction_range[0]) / range` | Margin pressure, waste penalty scale |
+| `inventory_norm` | `(inv*mult - cat.inventory_range[0]) / range` | Clearing difficulty |
+| `pack_size_norm` | `(pack - cat.pack_size_range[0]) / range` | Purchase dynamics, value-seeking behavior |
+
+**Excluded** (simulator leakage): `price_elasticity` and `base_markdown_demand` are never exposed to the agent. It learns demand characteristics through runtime signals (velocity, sell-through, projected clearance) combined with the observable proxies above.
+
+Pack sizes are generated with a separate RNG (`seed + 10000`) to preserve existing product parameters:
+
+| Category | pack_size_range |
+|----------|----------------|
+| meats | (1, 4) |
+| seafood | (1, 2) |
+| vegetables | (1, 4) |
+| fruits | (1, 6) |
+| dairy | (1, 2) |
+| bakery | (1, 12) |
+| deli_prepared | (1, 8) |
+
+---
+
+## Pooled Category Training
+
+### Motivation
+
+Per-SKU training (v1.4) achieves 86% beats-baseline but requires 300 models (150 plain + 150 shaped). Each new SKU requires full training from scratch. Pooled category training addresses this by training a single model per category that generalizes across all ~22 SKUs, conditioned on observable product features.
+
+### Why It Works (and Why Transfer Learning Failed)
+
+Transfer learning (v1.3) pre-trained on 10-dim state with **no product identity** — the model couldn't distinguish between different products during pre-training. It learned a blurred average policy that interfered with per-SKU fine-tuning (negative transfer: 71% vs 81%).
+
+Pooled training solves this by including 4 observable product features in every state (14-dim). The model explicitly knows which product it's pricing and can learn product-conditional strategies:
+
+```
+Per-SKU:  state = [10 env features]                        → 1 model per SKU
+TL:       state = [10 env features] (pretrain)             → 1 model per SKU (after fine-tune)
+Pooled:   state = [10 env features] + [4 product features] → 1 model per category
+```
+
+### PooledCategoryEnv
+
+`PooledCategoryEnv(gym.Env)` wraps multiple `MarkdownProductEnv` instances:
+
+```python
+class PooledCategoryEnv(gym.Env):
+    def __init__(self, category, step_hours, seed, demand_mult, inventory_mult):
+        # Creates one MarkdownProductEnv per SKU in the category
+        # Pre-computes 4-dim product features for each SKU
+        # observation_space = Box(0, 1, shape=(14,))
+
+    def reset(self, seed=None, options=None):
+        # Switch active product via options={"product": name}
+        # Returns 14-dim obs (10 env + 4 product features)
+
+    def step(self, action):
+        # Delegates to active inner env
+        # Appends product features to observation
+
+    def action_masks(self):
+        # Delegates to active inner env
+
+    def __getattr__(self, name):
+        # Delegates attribute access to active inner env
+        # Enables baselines to access env.step_count, etc.
+```
+
+### Training Pipeline (Pooled)
+
+```
+_train_category_pooled(category, products, episodes_per_sku, ...):
+  |
+  +-- Create PooledCategoryEnv (one env per SKU)
+  +-- Create DQN agent (state_dim=14)
+  |
+  +-- Prefill: pooled_prefill() runs baseline policies through
+  |   PooledCategoryEnv, producing 14-dim transitions
+  |
+  +-- Warmup: N gradient steps on buffered data
+  |
+  +-- Training loop (total_episodes = episodes_per_sku * len(products)):
+  |     Round-robin through products each episode:
+  |       product = products[episode % len(products)]
+  |       env.reset(options={"product": product})
+  |       [For shaped: agent.waste_cost_scale = shaping_ratio * revenue_scale]
+  |       Run episode → store transitions (14-dim) → train
+  |
+  +-- Evaluation: for each product:
+        env.reset(options={"product": product})
+        Run greedy DQN rollouts + baseline rollouts
+        Record metrics (same format as per-SKU results)
+```
+
+### State Space (14-dimensional)
+
+| Index | Feature | Source |
+|-------|---------|--------|
+| 0-9 | Base env features | `MarkdownProductEnv._get_obs()` |
+| 10 | `price_norm` | `get_product_features()` — static per product |
+| 11 | `cost_frac_norm` | `get_product_features()` — static per product |
+| 12 | `inventory_norm` | `get_product_features()` — static per product |
+| 13 | `pack_size_norm` | `get_product_features()` — static per product |
+
+Features 10-13 are constant within an episode and change only when switching products. They enable the network to learn product-conditional Q-values: `Q(s, a | product_features)`.
+
+### N-Step Compatibility
+
+All steps within one episode are for the same product — the n-step accumulator never mixes transitions across products. At episode boundaries, the accumulator flushes before switching to the next product.
+
+### Results Comparison
+
+| Approach | Models | Beats Baseline | Zero-Shot New SKUs |
+|----------|--------|---------------|-------------------|
+| Per-SKU (v1.4) | 300 | **86%** | No — requires training |
+| Pooled (v2) | 14 | 78% | **Yes** — compute features, use category model |
+| Transfer Learning (v1.3.2) | 300 | 71% | No — requires fine-tuning |
 
 ---
 

@@ -32,8 +32,9 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Projected clearance feature** enabling the agent to reason about whether holding current discount can clear inventory
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
 - **7 baseline policies** for rigorous comparison
+- **Pooled category training** (v2): trains 7 category-level models conditioned on 4 observable product features (14-dim state) — enables zero-shot pricing for new SKUs without retraining
 - **Transfer learning** (experimental): category pre-training + per-SKU fine-tuning available but underperforms direct training due to high intra-category SKU variance
-- **Portfolio runner** for cross-category validation with parallel workers
+- **Portfolio runner** for cross-category validation with parallel workers (per-SKU and pooled modes)
 - **Visualization suite**: per-product plots (training curves, policy heatmaps, episode walkthroughs, revenue-waste Pareto) + comprehensive portfolio plots (dashboard, DQN-vs-baseline scatter, category win rates, reward gap distribution, per-SKU gaps, baseline difficulty, revenue-waste comparison, three-way DQN/shaped/baseline comparison)
 
 ## Project Structure
@@ -46,6 +47,7 @@ fresh-rl-poc/
 │   ├── dqn_agent.py            # Double DQN with action masking (PyTorch)
 │   ├── baselines.py            # 7 rule-based markdown policies
 │   ├── product_catalog.py      # 150 SKUs across 7 categories
+│   ├── pooled_env.py           # PooledCategoryEnv for category-level training
 │   ├── prioritized_replay.py   # PER with SumTree
 │   ├── sumtree.py              # SumTree data structure for PER
 │   └── historical_data.py      # Baseline replay buffer pre-filling
@@ -81,11 +83,17 @@ python scripts/visualize.py --product salmon_fillet --step-hours 2 --per
 # Generate comprehensive portfolio visualizations (9 plots)
 python scripts/visualize.py --portfolio results/portfolio/portfolio_results.json
 
-# Run full portfolio across all 150 SKUs (best configuration — v1.4)
+# Run full portfolio across all 150 SKUs — per-SKU mode (best: v1.4, 86%)
 python scripts/run_portfolio.py --episodes 5000 --eval-episodes 100 \
     --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
+
+# Run pooled category training — 7 models for all 150 SKUs (v2, 78%)
+python scripts/run_portfolio.py --pooled --pooled-episodes-per-sku 5000 \
+    --eval-episodes 100 --step-hours 2 --per --prefill --warmup-steps 1000 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 --workers 7
 
 # Run a single product via portfolio runner
 python scripts/run_portfolio.py --products salmon_fillet --episodes 5000
@@ -167,9 +175,9 @@ The `shaping_ratio=0.2` normalizes the shaping signal to 20% of expected revenue
 
 ## Results
 
-### Portfolio Validation (v1.4 — 150 SKUs, hard mode, 10-dim state)
+### Per-SKU Training (v1.4 — 150 SKUs, best per-SKU result)
 
-Best configuration: 2h steps, 5000 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, n_step=5, hold_action_prob=0.5, 10-dim state with projected clearance
+Best per-SKU configuration: 2h steps, 5000 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, n_step=5, hold_action_prob=0.5, 10-dim state with projected clearance. Trains 300 models (150 plain + 150 shaped).
 
 | Metric | Value |
 |--------|-------|
@@ -188,7 +196,34 @@ Best configuration: 2h steps, 5000 episodes, PER + prefill + warmup, 0.5x demand
 | seafood | 22 | **77%** | Least elastic, hardest for DQN |
 | bakery | 21 | **76%** | Biggest improvement from v1.2 (+9pp) |
 
-See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (15 iterations) and learnings.
+### Pooled Category Training (v2 — 7 category-level models)
+
+Trains 14 models total (7 categories x 2 variants) instead of 300. Each model sees all ~22 SKUs in its category during training, conditioned on 4 observable product features appended to the state (14-dim). Enables **zero-shot pricing for new SKUs** — just compute product features and use the existing category model.
+
+| Metric | Per-SKU (v1.4) | Pooled (v2) |
+|--------|---------------|-------------|
+| Beats best baseline | **129/150 (86%)** | 117/150 (78%) |
+| Models trained | 300 | 14 |
+| Shaping wins | 61/150 (41%) | 70/150 (47%) |
+
+**Category breakdown (pooled, best of plain/shaped)**:
+
+| Category | SKUs | Pooled Win% | Per-SKU Win% |
+|----------|------|-------------|--------------|
+| dairy | 21 | **90%** | 81% |
+| deli_prepared | 22 | **86%** | 91% |
+| vegetables | 21 | **81%** | 86% |
+| fruits | 21 | **81%** | 86% |
+| meats | 22 | **73%** | 91% |
+| seafood | 22 | **73%** | 77% |
+| bakery | 21 | **62%** | 76% |
+
+**When to use which**:
+- **Per-SKU**: Best absolute performance (86%) when you can afford per-product training
+- **Pooled**: Instant zero-shot policy for new SKUs, 21x fewer models, good performance (78%)
+- **Hybrid**: Use pooled model on day 1 of a new SKU, optionally train per-SKU model later
+
+See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (16 iterations) and learnings.
 
 ## References
 

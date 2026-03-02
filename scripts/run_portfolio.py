@@ -118,6 +118,257 @@ def _pretrain_category(
     return model_path
 
 
+# ── Pooled category pipeline (runs in worker process) ─────────────────────
+
+def _evaluate_pooled_product(env, agent_plain, agent_shaped, product, n_actions, eval_episodes, seed):
+    """Evaluate plain + shaped agents and all baselines for one product in a pooled env."""
+    from scripts.evaluate import evaluate_policy
+    from fresh_rl.dqn_agent import DQNAgent
+    from fresh_rl.baselines import get_all_baselines
+
+    # Set env to this product (subsequent reset() calls stay on it)
+    env.reset(options={"product": product})
+
+    agent_plain.epsilon = 0.0
+    agent_plain.name = "DQN Plain"
+    agent_shaped.epsilon = 0.0
+    agent_shaped.name = "DQN Shaped"
+
+    baselines = get_all_baselines(n_actions=n_actions, seed=seed)
+
+    eval_results = {}
+    for policy in [agent_plain, agent_shaped] + baselines:
+        is_dqn = isinstance(policy, DQNAgent)
+        name = policy.name if hasattr(policy, "name") else str(policy)
+        er = evaluate_policy(env, policy, n_episodes=eval_episodes, seed=seed, is_dqn=is_dqn)
+        eval_results[name] = er
+
+    return eval_results
+
+
+def _train_category_pooled(
+    category,
+    products,
+    episodes_per_sku,
+    eval_episodes,
+    step_hours,
+    seed,
+    save_dir,
+    shaping_ratio,
+    use_per,
+    prefill,
+    prefill_episodes,
+    warmup_steps,
+    demand_mult=1.0,
+    inventory_mult=1.0,
+    epsilon_decay=None,
+    hidden_dim=64,
+    replay_ratio=1,
+    batch_size=32,
+    buffer_size=10000,
+    n_step=1,
+    hold_action_prob=0.0,
+):
+    """Train plain + shaped pooled DQN for one category, evaluate per-SKU."""
+    from fresh_rl.pooled_env import PooledCategoryEnv, pooled_prefill
+    from fresh_rl.dqn_agent import DQNAgent
+    from fresh_rl.product_catalog import generate_catalog
+
+    cat_dir = os.path.join(save_dir, f"_pooled_{category}")
+    os.makedirs(cat_dir, exist_ok=True)
+
+    catalog = generate_catalog()
+
+    # Create pooled env
+    env = PooledCategoryEnv(
+        category=category,
+        step_hours=step_hours,
+        seed=seed,
+        demand_mult=demand_mult,
+        inventory_mult=inventory_mult,
+    )
+
+    state_dim = env.observation_space.shape[0]  # 14
+    n_actions = env.action_space.n
+
+    if epsilon_decay is None:
+        epsilon_decay = 0.998 if step_hours == 2 else 0.997
+
+    total_episodes = episodes_per_sku * len(products)
+
+    print(f"  [POOLED] {category}: {len(products)} products, "
+          f"{episodes_per_sku} eps/SKU = {total_episodes} total, state_dim={state_dim}")
+
+    # Helper to create a fresh agent
+    def _make_agent(reward_shaping, waste_cost_scale=None):
+        return DQNAgent(
+            state_dim=state_dim,
+            n_actions=n_actions,
+            hidden_dim=hidden_dim,
+            lr=5e-4,
+            gamma=0.97,
+            epsilon_start=1.0,
+            epsilon_end=0.05,
+            epsilon_decay=epsilon_decay,
+            buffer_size=buffer_size,
+            batch_size=batch_size,
+            reward_shaping=reward_shaping,
+            waste_cost_scale=waste_cost_scale,
+            seed=seed,
+            use_per=use_per,
+            n_step=n_step,
+            hold_action_prob=hold_action_prob,
+        )
+
+    results = []
+
+    for variant, shaping in [("plain", False), ("shaped", True)]:
+        # Compute initial waste_cost_scale from first product (will be updated per-episode)
+        first_profile = catalog[products[0]]
+        first_env = env._envs[products[0]]
+        revenue_scale = first_env.base_price * first_env.initial_inventory
+        waste_cost_scale = shaping_ratio * revenue_scale if shaping else None
+
+        agent = _make_agent(reward_shaping=shaping, waste_cost_scale=waste_cost_scale)
+
+        # Prefill
+        if prefill:
+            print(f"    [{variant}] Prefilling {prefill_episodes} eps/product...")
+            n_trans = pooled_prefill(
+                env, agent, episodes_per_product=prefill_episodes,
+                products=products, seed=seed,
+            )
+            print(f"    [{variant}] Added {n_trans} transitions")
+
+        # Warmup
+        if warmup_steps > 0 and len(agent.replay_buffer) >= agent.batch_size:
+            print(f"    [{variant}] Warming up {warmup_steps} steps...")
+            for step in range(warmup_steps):
+                agent.train_step_fn()
+
+        # Training: round-robin through products
+        for ep in range(total_episodes):
+            product = products[ep % len(products)]
+            inner_env = env._envs[product]
+
+            # Update waste_cost_scale per-product for shaped variant
+            if shaping:
+                rev_scale = inner_env.base_price * inner_env.initial_inventory
+                agent.waste_cost_scale = shaping_ratio * rev_scale
+
+            obs, _ = env.reset(
+                seed=seed + ep,
+                options={"product": product},
+            )
+            done = False
+
+            while not done:
+                mask = env.action_masks()
+                action = agent.select_action(obs, action_mask=mask)
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                next_mask = env.action_masks() if not done else np.ones(n_actions, dtype=bool)
+                agent.store_transition(obs, action, reward, next_obs, done, next_mask)
+                for _ in range(replay_ratio):
+                    agent.train_step_fn()
+                obs = next_obs
+
+            agent.decay_epsilon()
+
+            if (ep + 1) % 500 == 0:
+                print(f"    [{variant}] {category}: ep {ep+1}/{total_episodes}, eps={agent.epsilon:.3f}")
+
+        # Save model
+        model_path = os.path.join(cat_dir, f"pooled_{category}_{variant}_{step_hours}h.pt")
+        agent.save(model_path)
+        print(f"    [{variant}] Saved: {model_path}")
+
+        if variant == "plain":
+            agent_plain = agent
+        else:
+            agent_shaped = agent
+
+    # Evaluate per-SKU
+    print(f"  [POOLED] {category}: evaluating {len(products)} products...")
+    for product in products:
+        profile = catalog[product]
+        effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
+        effective_demand = round(profile.get("base_markdown_demand", 5.0) * demand_mult, 1)
+
+        result = {
+            "product": product,
+            "category": category,
+            "base_price": profile.get("base_price", 0),
+            "cost_per_unit": profile.get("cost_per_unit", 0),
+            "markdown_window_hours": profile.get("markdown_window_hours", 0),
+            "initial_inventory": effective_inv,
+            "base_markdown_demand": effective_demand,
+            "price_elasticity": profile.get("price_elasticity", 0),
+        }
+
+        try:
+            eval_results = _evaluate_pooled_product(
+                env, agent_plain, agent_shaped, product, n_actions, eval_episodes, seed,
+            )
+
+            plain_r = eval_results["DQN Plain"]
+            shaped_r = eval_results["DQN Shaped"]
+
+            result["plain_reward"] = plain_r["mean_reward"]
+            result["plain_revenue"] = plain_r["mean_revenue"]
+            result["plain_waste"] = plain_r["mean_waste_rate"]
+            result["plain_clearance"] = plain_r["mean_clearance_rate"]
+
+            result["shaped_reward"] = shaped_r["mean_reward"]
+            result["shaped_revenue"] = shaped_r["mean_revenue"]
+            result["shaped_waste"] = shaped_r["mean_waste_rate"]
+            result["shaped_clearance"] = shaped_r["mean_clearance_rate"]
+
+            # Best baseline
+            from fresh_rl.baselines import get_all_baselines
+            baseline_names = [b.name for b in get_all_baselines(n_actions=n_actions, seed=seed)]
+            baseline_evals = {k: v for k, v in eval_results.items() if k in baseline_names}
+            best_bl_name = max(baseline_evals, key=lambda k: baseline_evals[k]["mean_reward"])
+            best_bl = baseline_evals[best_bl_name]
+
+            result["best_baseline"] = best_bl_name
+            result["best_baseline_reward"] = best_bl["mean_reward"]
+            result["best_baseline_revenue"] = best_bl["mean_revenue"]
+            result["best_baseline_waste"] = best_bl["mean_waste_rate"]
+
+            result["shaped_vs_plain_reward"] = shaped_r["mean_reward"] - plain_r["mean_reward"]
+            result["shaped_vs_plain_revenue_pct"] = (
+                (shaped_r["mean_revenue"] - plain_r["mean_revenue"])
+                / max(abs(plain_r["mean_revenue"]), 0.01) * 100
+            )
+            result["shaped_vs_baseline_revenue_pct"] = (
+                (shaped_r["mean_revenue"] - best_bl["mean_revenue"])
+                / max(abs(best_bl["mean_revenue"]), 0.01) * 100
+            )
+            result["shaping_wins"] = shaped_r["mean_reward"] > plain_r["mean_reward"]
+            result["beats_baseline"] = shaped_r["mean_reward"] > best_bl["mean_reward"]
+            result["status"] = "ok"
+
+            # Save per-product eval
+            product_dir = os.path.join(save_dir, product)
+            os.makedirs(product_dir, exist_ok=True)
+            with open(os.path.join(product_dir, "eval_summary.json"), "w") as f:
+                json.dump({**result, "eval_details": eval_results}, f, indent=2, default=str)
+
+        except Exception as e:
+            result["status"] = "error"
+            result["error"] = f"{type(e).__name__}: {e}"
+            traceback.print_exc()
+
+        results.append(result)
+
+        status = "OK" if result["status"] == "ok" else "ERROR"
+        win = "WIN" if result.get("beats_baseline") else "---"
+        print(f"    {product:<30s} {status}  {win}  reward: {result.get('shaped_reward', 0):.1f}")
+
+    return results
+
+
 # ── Single-product pipeline (runs in worker process) ─────────────────────
 
 def _run_single_product(
@@ -538,6 +789,12 @@ def main():
     parser.add_argument("--pretrain-episodes", type=int, default=1500,
                         help="Pre-training episodes per category (default: 1500)")
 
+    # Pooled category training
+    parser.add_argument("--pooled", action="store_true",
+                        help="Train 7 category-level pooled models instead of 150 per-SKU models")
+    parser.add_argument("--pooled-episodes-per-sku", type=int, default=2500,
+                        help="Training episodes per SKU in pooled mode (default: 2500)")
+
     args = parser.parse_args()
 
     # Build product list
@@ -589,9 +846,95 @@ def main():
         print(f"  Inventory mult: {args.inventory_mult}x")
     if args.transfer_learning:
         print(f"  Transfer learn: ON ({args.pretrain_episodes} pretrain episodes)")
+    if args.pooled:
+        print(f"  Pooled mode:    ON ({args.pooled_episodes_per_sku} eps/SKU)")
     print(f"  Workers:        {args.workers}")
     print(f"  Save dir:       {args.save_dir}")
     print(f"{'='*70}\n")
+
+    # ── Pooled category training mode ─────────────────────────────────────
+    if args.pooled:
+        catalog = generate_catalog()
+        categories_to_train = {}
+        for p in products:
+            cat = catalog[p].get("_category", "unknown")
+            categories_to_train.setdefault(cat, []).append(p)
+
+        print(f"  Pooled mode: {len(categories_to_train)} categories, "
+              f"{len(products)} total SKUs\n")
+
+        pooled_kwargs = dict(
+            episodes_per_sku=args.pooled_episodes_per_sku,
+            eval_episodes=args.eval_episodes,
+            step_hours=args.step_hours,
+            seed=args.seed,
+            save_dir=args.save_dir,
+            shaping_ratio=args.shaping_ratio,
+            use_per=args.per,
+            prefill=args.prefill,
+            prefill_episodes=args.prefill_episodes,
+            warmup_steps=args.warmup_steps,
+            demand_mult=args.demand_mult,
+            inventory_mult=args.inventory_mult,
+            epsilon_decay=args.epsilon_decay,
+            hidden_dim=args.hidden_dim,
+            replay_ratio=args.replay_ratio,
+            batch_size=args.batch_size,
+            buffer_size=args.buffer_size,
+            n_step=args.n_step,
+            hold_action_prob=args.hold_action_prob,
+        )
+
+        all_results = []
+        start_time = time.time()
+
+        if args.workers > 1:
+            with ProcessPoolExecutor(
+                max_workers=min(args.workers, len(categories_to_train))
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _train_category_pooled,
+                        category=cat,
+                        products=cat_products,
+                        **pooled_kwargs,
+                    ): cat
+                    for cat, cat_products in categories_to_train.items()
+                }
+                for future in as_completed(futures):
+                    cat = futures[future]
+                    try:
+                        cat_results = future.result()
+                        all_results.extend(cat_results)
+                        ok = sum(1 for r in cat_results if r["status"] == "ok")
+                        wins = sum(1 for r in cat_results if r.get("beats_baseline"))
+                        print(f"  [{cat}] Done: {ok} ok, {wins} beat baseline")
+                    except Exception as e:
+                        print(f"  [{cat}] FAILED: {e}")
+                        traceback.print_exc()
+        else:
+            for cat, cat_products in categories_to_train.items():
+                cat_results = _train_category_pooled(
+                    category=cat,
+                    products=cat_products,
+                    **pooled_kwargs,
+                )
+                all_results.extend(cat_results)
+                save_results(all_results, args.save_dir)
+
+        elapsed = time.time() - start_time
+        print(f"\n  Total time: {elapsed/60:.1f} minutes")
+
+        save_results(all_results, args.save_dir)
+        print_aggregate_report(all_results)
+        plot_portfolio_summary(all_results, args.save_dir)
+
+        portfolio_json = os.path.join(args.save_dir, "portfolio_results.json")
+        if os.path.exists(portfolio_json):
+            from scripts.visualize import generate_portfolio_plots
+            generate_portfolio_plots(portfolio_json, save_dir=args.save_dir)
+
+        return
 
     common_kwargs = dict(
         episodes=args.episodes,
