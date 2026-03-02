@@ -33,7 +33,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Revenue-normalized reward shaping** (shaping_ratio=0.2) for waste-aware learning
 - **7 baseline policies** for rigorous comparison
 - **Pooled category training** (v2): trains 7 category-level models conditioned on 4 observable product features (14-dim state) — enables zero-shot pricing for new SKUs without retraining
-- **Transfer learning** (experimental): category pre-training + per-SKU fine-tuning available but underperforms direct training due to high intra-category SKU variance
+- **Pooled transfer learning** (v2.1): uses pooled model weights as initialization for per-SKU fine-tuning via `AugmentedProductEnv` (14-dim state) — best overall at 95% beats-baseline
 - **Portfolio runner** for cross-category validation with parallel workers (per-SKU and pooled modes)
 - **Visualization suite**: per-product plots (training curves, policy heatmaps, episode walkthroughs, revenue-waste Pareto) + comprehensive portfolio plots (dashboard, DQN-vs-baseline scatter, category win rates, reward gap distribution, per-SKU gaps, baseline difficulty, revenue-waste comparison, three-way DQN/shaped/baseline comparison)
 
@@ -83,7 +83,15 @@ python scripts/visualize.py --product salmon_fillet --step-hours 2 --per
 # Generate comprehensive portfolio visualizations (9 plots)
 python scripts/visualize.py --portfolio results/portfolio/portfolio_results.json
 
-# Run full portfolio across all 150 SKUs — per-SKU mode (best: v1.4, 86%)
+# Run pooled->per-SKU transfer learning — best mode (v2.1, 95%)
+python scripts/run_portfolio.py --pooled-tl \
+    --pooled-model-dir results/portfolio_v2_pooled \
+    --episodes 5000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
+
+# Run per-SKU portfolio (v1.4, 86%)
 python scripts/run_portfolio.py --episodes 5000 --eval-episodes 100 \
     --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
@@ -175,7 +183,33 @@ The `shaping_ratio=0.2` normalizes the shaping signal to 20% of expected revenue
 
 ## Results
 
-### Per-SKU Training (v1.4 — 150 SKUs, best per-SKU result)
+### Pooled Transfer Learning (v2.1 — best overall, 95%)
+
+Uses pooled category model weights (v2) as initialization for per-SKU fine-tuning. `AugmentedProductEnv` wraps per-SKU envs to produce 14-dim state matching pooled model input, so weights transfer directly. Fine-tunes with 5000 episodes per SKU under hard mode (0.5x demand, 2x inventory).
+
+| Metric | v2.1 Pooled TL | v1.4 Per-SKU | v2 Pooled |
+|--------|---------------|-------------|-----------|
+| **Beats best baseline** | **142/150 (95%)** | 129/150 (86%) | 117/150 (78%) |
+| Models trained | 300 | 300 | 14 |
+| Shaping wins | 66/150 (44%) | 61/150 (41%) | 70/150 (47%) |
+
+**Category breakdown (v2.1, best of plain/shaped)**:
+
+| Category | SKUs | v2.1 TL Win% | v1.4 Per-SKU | v2 Pooled |
+|----------|------|-------------|--------------|-----------|
+| dairy | 21 | **100%** | 81% | 90% |
+| deli_prepared | 22 | **100%** | 91% | 86% |
+| fruits | 21 | **95%** | 86% | 81% |
+| vegetables | 21 | **95%** | 86% | 81% |
+| meats | 22 | **91%** | 91% | 73% |
+| seafood | 22 | **91%** | 77% | 73% |
+| bakery | 21 | **90%** | 76% | 62% |
+
+Only 8 products didn't beat baseline, all near-ties (gaps < 4 reward).
+
+**Why v2.1 works**: Pooled models learn product-conditional pricing via the 4 observable features. The hidden layers encode representations that account for product differences — this transfers directly to per-SKU fine-tuning. Unlike old TL (v1.3, 71%), the model *knows* which product it's pricing during pre-training.
+
+### Per-SKU Training (v1.4 — 150 SKUs)
 
 Best per-SKU configuration: 2h steps, 5000 episodes, PER + prefill + warmup, 0.5x demand, 2x inventory, epsilon_decay=0.999, hidden_dim=128, n_step=5, hold_action_prob=0.5, 10-dim state with projected clearance. Trains 300 models (150 plain + 150 shaped).
 
@@ -183,18 +217,6 @@ Best per-SKU configuration: 2h steps, 5000 episodes, PER + prefill + warmup, 0.5
 |--------|-------|
 | Beats best baseline (plain DQN) | **129/150 (86%)** |
 | Beats best baseline (shaped DQN) | **126/150 (84%)** |
-
-**Category breakdown (plain DQN)**:
-
-| Category | SKUs | Win% | Notes |
-|----------|------|------|-------|
-| deli_prepared | 22 | **91%** | High price, moderate elasticity |
-| meats | 22 | **91%** | Consistent top performer |
-| vegetables | 21 | **86%** | High elasticity + high demand |
-| fruits | 21 | **86%** | Moderate price, elastic |
-| dairy | 21 | **81%** | Improved steadily across iterations |
-| seafood | 22 | **77%** | Least elastic, hardest for DQN |
-| bakery | 21 | **76%** | Biggest improvement from v1.2 (+9pp) |
 
 ### Pooled Category Training (v2 — 7 category-level models)
 
@@ -206,24 +228,13 @@ Trains 14 models total (7 categories x 2 variants) instead of 300. Each model se
 | Models trained | 300 | 14 |
 | Shaping wins | 61/150 (41%) | 70/150 (47%) |
 
-**Category breakdown (pooled, best of plain/shaped)**:
-
-| Category | SKUs | Pooled Win% | Per-SKU Win% |
-|----------|------|-------------|--------------|
-| dairy | 21 | **90%** | 81% |
-| deli_prepared | 22 | **86%** | 91% |
-| vegetables | 21 | **81%** | 86% |
-| fruits | 21 | **81%** | 86% |
-| meats | 22 | **73%** | 91% |
-| seafood | 22 | **73%** | 77% |
-| bakery | 21 | **62%** | 76% |
-
 **When to use which**:
-- **Per-SKU**: Best absolute performance (86%) when you can afford per-product training
+- **Pooled TL (v2.1)**: Best absolute performance (95%) — use when pooled models are available and per-SKU training is feasible
+- **Per-SKU**: Good performance (86%) without needing pooled pre-training
 - **Pooled**: Instant zero-shot policy for new SKUs, 21x fewer models, good performance (78%)
-- **Hybrid**: Use pooled model on day 1 of a new SKU, optionally train per-SKU model later
+- **Hybrid**: Use pooled model on day 1 of a new SKU, fine-tune per-SKU with pooled TL for peak performance
 
-See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (16 iterations) and learnings.
+See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (17 iterations) and learnings.
 
 ## References
 

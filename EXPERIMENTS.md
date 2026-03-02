@@ -942,6 +942,91 @@ python scripts/run_portfolio.py --pooled --pooled-episodes-per-sku 5000 \
 
 ---
 
+## Iteration 17: Pooled→Per-SKU Transfer Learning (v2.1 — 95% beats-baseline)
+
+**Commit**: (v2.1)
+
+**Goal**: Use pooled category model weights (v2, 14-dim state) as initialization for per-SKU fine-tuning. The hypothesis: pooled models already understand product-conditional pricing via the 4 observable features — transferring these representations should beat both per-SKU from scratch (v1.4, 86%) and the old TL that had no product identity (v1.3, 71%).
+
+**Key difference from old TL (v1.3)**:
+- **Old TL**: category pre-train on 10-dim state (no product identity) → per-SKU fine-tune with 10-dim state → 71% beats-baseline
+- **Pooled TL (v2.1)**: pooled model trained on 14-dim state (with product features) → per-SKU fine-tune with 14-dim state → **95% beats-baseline**
+
+**Changes**:
+
+### 1. AugmentedProductEnv (`pooled_env.py`)
+- `AugmentedProductEnv(gym.Wrapper)`: wraps a single `MarkdownProductEnv` to append 4 product features to every observation (10→14 dim)
+- Keeps the change isolated — `train()`, `evaluate_policy()`, and `HistoricalDataGenerator` all work transparently through the wrapper
+- `__getattr__` delegates attribute access to wrapped env so baselines can access `env.step_count`, `env.inventory_remaining`, etc.
+- Product features are constant (same product throughout all episodes), unlike `PooledCategoryEnv` where features change on product switch
+
+### 2. Weight transfer mechanism
+- Pooled model: `Linear(14, 128)` → Per-SKU agent: `Linear(14, 128)` (created with `state_dim=14` via augmented env)
+- `load_pretrained()` works as-is — no weight surgery needed
+- Plain DQN loads `pooled_{category}_plain_{step_hours}h.pt`; shaped DQN loads `pooled_{category}_shaped_{step_hours}h.pt`
+- Transfer epsilon starts at 0.3 (lower exploration for fine-tuning)
+
+### 3. train.py changes
+- New params: `augment_state: bool`, `inventory_mult: float`
+- When `augment_state=True`: wraps env with `AugmentedProductEnv` right after creation
+- `state_dim=14` flows automatically to agent, prefill, and greedy eval
+- `HistoricalDataGenerator` accepts optional external env for augmented prefill
+
+### 4. run_portfolio.py — `--pooled-tl` mode
+- New CLI flags: `--pooled-tl`, `--pooled-model-dir`
+- Per-product dispatch: determines category → builds pooled model paths → passes to `_run_single_product()`
+- Evaluation wraps eval env with `AugmentedProductEnv` when `augment_state=True`
+
+**Setup (v2.1)**:
+```bash
+python scripts/run_portfolio.py --pooled-tl \
+    --pooled-model-dir results/portfolio_v2_pooled \
+    --episodes 5000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --save-dir results/portfolio_v21_pooled_tl
+```
+
+### Results
+
+| Metric | v2.1 Pooled TL | v1.4 Per-SKU | v2 Pooled | v1.3 Old TL |
+|--------|---------------|-------------|-----------|-------------|
+| Beats best baseline | **142/150 (95%)** | 129/150 (86%) | 117/150 (78%) | 107/150 (71%) |
+| Shaping wins | 66/150 (44%) | 61/150 (41%) | 70/150 (47%) | — |
+| Models trained | 300 | 300 | 14 | 300 |
+| Runtime (~) | ~160 min (16 workers) | ~90 min (16 workers) | ~180 min (7 workers) | ~120 min |
+
+**Category breakdown (v2.1, best of plain/shaped)**:
+
+| Category | SKUs | v2.1 Pooled TL | v1.4 Per-SKU | v2 Pooled | Delta vs v1.4 |
+|----------|------|---------------|--------------|-----------|---------------|
+| dairy | 21 | **100%** | 81% | 90% | **+19pp** |
+| deli_prepared | 22 | **100%** | 91% | 86% | **+9pp** |
+| fruits | 21 | **95%** | 86% | 81% | **+9pp** |
+| vegetables | 21 | **95%** | 86% | 81% | **+9pp** |
+| meats | 22 | **91%** | 91% | 73% | +0pp |
+| seafood | 22 | **91%** | 77% | 73% | **+14pp** |
+| bakery | 21 | **90%** | 76% | 62% | **+14pp** |
+
+### Analysis
+
+1. **95% beats-baseline with the same model count (300)**: The +9pp improvement over v1.4 comes entirely from better weight initialization. Pooled representations give per-SKU agents a head start on understanding price-demand relationships.
+
+2. **Dairy and deli_prepared hit 100%**: Every single SKU in these categories beats its best baseline. These categories had the best pooled performance (90% and 86%), so the transfer is strongest where the pooled model was already effective.
+
+3. **Biggest improvements in previously weak categories**: bakery (+14pp, 76%→90%) and seafood (+14pp, 77%→91%) benefit most from transfer. The pooled model provides useful general pricing knowledge even for categories where it struggled to fully specialize.
+
+4. **Only 8 non-winners, all near-ties**: bacon_pack, blueberries_6oz, croissants_4pk, pretzel_rolls_6pk, poke_bowl, salad_mix_5oz, smoked_salmon_4oz, veal_cutlet — all within 4 reward of baseline. These are products where the best baseline (usually Immediate Deep 70% or Backloaded Progressive) is essentially optimal.
+
+5. **Why this works but old TL failed**: Old TL (v1.3) pre-trained on 10-dim state with **no product identity** — the model learned a blurred average policy. Pooled models (v2) train on 14-dim state with observable product features, learning **product-conditional** representations. When transferred, these representations give the fine-tuned model a meaningful starting point rather than a conflicting one.
+
+6. **Shaping win rate unchanged (44% vs 41%)**: Transfer learning doesn't change the shaping dynamics — it's still most useful for hard-to-clear products where waste avoidance matters.
+
+**Learning**: **Pooled→per-SKU transfer learning is the clear best approach (95% vs 86% vs 78%).** The key insight is that transfer learning works when the pre-trained model has product identity in its state — observable product features let the pooled model learn representations that transfer meaningfully to individual SKUs. The progression is: train 7 pooled models (cheap) → fine-tune 150 per-SKU models with pooled initialization (best results). The extra runtime (~160 min vs ~90 min for per-SKU) is modest given the +9pp improvement.
+
+---
+
 ## Key Learnings Summary
 
 ### When reward shaping helps
@@ -975,6 +1060,7 @@ Shaping is neutral/noise when:
 | Hold-action exploration + conservative prefill | New best overall: 52% beats-baseline (+6pp), driven by 24h product improvement |
 | Longer training (5000ep) | New best 84% beats-baseline (+3pp over 3000ep). Plain DQN reaches 86% — shaping unnecessary with enough data |
 | Pooled category training (14-dim state) | 78% beats-baseline with only 14 models (vs 300). Enables zero-shot pricing for new SKUs via observable product features |
+| Pooled→per-SKU TL (14-dim state) | **New best 95% beats-baseline (+9pp over per-SKU).** Pooled weights with product identity transfer meaningfully — unlike old TL's 10-dim blurred representations |
 
 ### What didn't work / watch out for
 
@@ -993,3 +1079,4 @@ Shaping is neutral/noise when:
 | Hold-action bias on 48h products | 48h products need *more* discounting, not less — hold bias pushed the agent in the wrong direction. 48h failure is structural (demand >> inventory), not an exploration problem |
 | Projected clearance leaking simulator data | Initial implementation used demand model internals (elasticity, intraday pattern) — had to hotfix to velocity-based `(recent_velocity * remaining_steps) / inventory` |
 | Pooled training — bakery/meats categories | High intra-category diversity hurts pooled models most (bakery 62%, meats 73%). A single model can't fully specialize for very different products in the same category |
+| Old TL but not pooled TL | The difference is product identity: 10-dim pre-training (v1.3) → negative transfer; 14-dim pre-training with product features (v2.1) → +9pp improvement. Observable features in the state are the key enabler |

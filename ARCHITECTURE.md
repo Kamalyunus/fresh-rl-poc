@@ -1201,11 +1201,11 @@ Phase 2: Fine-tune per SKU
     4. Train for M episodes (standard pipeline: both plain and shaped)
 ```
 
-**Experimental findings**: Transfer learning was tested extensively (v1.3–v1.3.2) but **underperforms direct training** on this catalog. With 3000 fine-tuning episodes, TL achieves 71% beats-baseline vs 81% without TL — and takes longer. The root cause is high intra-category SKU variance: price ranges within a category (e.g., $5–$15 for meats) mean category-level pre-training learns an overly generic policy that interferes with SKU-specific optimization (negative transfer). Direct per-SKU training with 5000 episodes achieves the best results (86%).
+**Experimental findings (v1.3)**: Old-style transfer learning (10-dim state, no product identity) was tested extensively (v1.3–v1.3.2) but **underperforms direct training**. With 3000 fine-tuning episodes, TL achieves 71% beats-baseline vs 81% without TL. The root cause is high intra-category SKU variance: category-level pre-training learns an overly generic policy that interferes with SKU-specific optimization (negative transfer).
 
-**Architecture compatibility**: All products share `state_dim=10` and the same `n_actions`, so weights transfer directly without any adaptation layers.
+**Pooled TL (v2.1)**: Fixes the core failure by using pooled model weights (14-dim state with product features) as initialization. `AugmentedProductEnv` wraps per-SKU envs to produce 14-dim state matching pooled input, so `load_pretrained()` works directly — no weight surgery. Achieves **95% beats-baseline**, the best result. See [Pooled Category Training](#pooled-category-training).
 
-**Superseded by Pooled Training (v2)**: Pooled category training addresses TL's core failure — the lack of product identity during pre-training — by including 4 observable product features in the state (14-dim). This achieves 78% beats-baseline with 14 models vs TL's 71% with 300 models. See [Pooled Category Training](#pooled-category-training).
+**Architecture compatibility**: For old TL (v1.3), all products share `state_dim=10`. For pooled TL (v2.1), `AugmentedProductEnv` produces `state_dim=14` matching the pooled model, so weights transfer directly.
 
 **`load_pretrained()` method** (`DQNAgent`):
 - Loads only `q_network` state dict from the saved checkpoint
@@ -1375,18 +1375,19 @@ Pack sizes are generated with a separate RNG (`seed + 10000`) to preserve existi
 
 ### Motivation
 
-Per-SKU training (v1.4) achieves 86% beats-baseline but requires 300 models (150 plain + 150 shaped). Each new SKU requires full training from scratch. Pooled category training addresses this by training a single model per category that generalizes across all ~22 SKUs, conditioned on observable product features.
+Per-SKU training (v1.4) achieves 86% beats-baseline but requires 300 models (150 plain + 150 shaped). Each new SKU requires full training from scratch. Pooled category training addresses this by training a single model per category that generalizes across all ~22 SKUs, conditioned on observable product features. Pooled TL (v2.1) combines both: pooled weights as initialization for per-SKU fine-tuning, achieving 95% beats-baseline.
 
 ### Why It Works (and Why Transfer Learning Failed)
 
-Transfer learning (v1.3) pre-trained on 10-dim state with **no product identity** — the model couldn't distinguish between different products during pre-training. It learned a blurred average policy that interfered with per-SKU fine-tuning (negative transfer: 71% vs 81%).
+Old transfer learning (v1.3) pre-trained on 10-dim state with **no product identity** — the model couldn't distinguish between different products during pre-training. It learned a blurred average policy that interfered with per-SKU fine-tuning (negative transfer: 71% vs 81%).
 
-Pooled training solves this by including 4 observable product features in every state (14-dim). The model explicitly knows which product it's pricing and can learn product-conditional strategies:
+Pooled training solves this by including 4 observable product features in every state (14-dim). The model explicitly knows which product it's pricing and can learn product-conditional strategies. Pooled TL (v2.1) then transfers these product-aware representations to per-SKU fine-tuning:
 
 ```
-Per-SKU:  state = [10 env features]                        → 1 model per SKU
-TL:       state = [10 env features] (pretrain)             → 1 model per SKU (after fine-tune)
-Pooled:   state = [10 env features] + [4 product features] → 1 model per category
+Per-SKU:    state = [10 env features]                        → 1 model per SKU (86%)
+Old TL:     state = [10 env features] (pretrain)             → 1 model per SKU (71%)
+Pooled:     state = [10 env features] + [4 product features] → 1 model per category (78%)
+Pooled TL:  state = [10 env features] + [4 product features] → 1 model per SKU (95%)
 ```
 
 ### PooledCategoryEnv
@@ -1454,6 +1455,28 @@ _train_category_pooled(category, products, episodes_per_sku, ...):
 
 Features 10-13 are constant within an episode and change only when switching products. They enable the network to learn product-conditional Q-values: `Q(s, a | product_features)`.
 
+### AugmentedProductEnv (for Pooled TL)
+
+`AugmentedProductEnv(gym.Wrapper)` wraps a single `MarkdownProductEnv` to produce 14-dim observations matching the pooled model input. Used for pooled→per-SKU transfer learning (v2.1):
+
+```python
+class AugmentedProductEnv(gym.Wrapper):
+    def __init__(self, env, product_name, inventory_mult=1.0):
+        # Appends 4 constant product features to every observation
+        # observation_space = Box(0, 1, shape=(14,))
+
+    def reset(self, **kwargs):
+        # Returns 14-dim obs (10 env + 4 product features)
+
+    def step(self, action):
+        # Appends product features to observation
+
+    def __getattr__(self, name):
+        # Delegates attribute access to wrapped env (for baselines)
+```
+
+The 4 product features are constant throughout all episodes (same product), unlike `PooledCategoryEnv` where features change on product switch. This lets pooled model weights (`Linear(14, 128)`) load directly into per-SKU agents with matching architecture.
+
 ### N-Step Compatibility
 
 All steps within one episode are for the same product — the n-step accumulator never mixes transitions across products. At episode boundaries, the accumulator flushes before switching to the next product.
@@ -1462,9 +1485,10 @@ All steps within one episode are for the same product — the n-step accumulator
 
 | Approach | Models | Beats Baseline | Zero-Shot New SKUs |
 |----------|--------|---------------|-------------------|
-| Per-SKU (v1.4) | 300 | **86%** | No — requires training |
+| **Pooled TL (v2.1)** | **300** | **95%** | No — requires fine-tuning |
+| Per-SKU (v1.4) | 300 | 86% | No — requires training |
 | Pooled (v2) | 14 | 78% | **Yes** — compute features, use category model |
-| Transfer Learning (v1.3.2) | 300 | 71% | No — requires fine-tuning |
+| Old TL (v1.3.2) | 300 | 71% | No — requires fine-tuning |
 
 ---
 
