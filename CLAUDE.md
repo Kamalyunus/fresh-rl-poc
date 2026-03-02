@@ -47,6 +47,14 @@ python scripts/visualize.py --portfolio results/portfolio_v21_pooled_tl/portfoli
 
 # List all products
 python scripts/train.py --list-products
+
+# --- Production (deployment/) ---
+
+# Nightly batch training (all SKUs)
+python -m deployment.batch_train --date 2026-03-01 --workers 16
+
+# Nightly batch training (single SKU)
+python -m deployment.batch_train --date 2026-03-01 --sku salmon_fillet
 ```
 
 ## Architecture
@@ -67,6 +75,14 @@ scripts/
   evaluate.py           — evaluate_policy() for greedy rollouts
   run_portfolio.py      — Portfolio runner (per-SKU, pooled, and pooled-TL modes)
   visualize.py          — Single-product + portfolio visualizations (10 portfolio plots)
+
+deployment/
+  config.py             — Constants, DQN defaults, ProductionConfig (path management)
+  state.py              — StateConstructor: 14-dim state from session data
+  session.py            — SessionManager + ActiveSession: daytime session tracking + CSV logging
+  inference.py          — PricingAgent: 3-tier model fallback (per-SKU → pooled → baseline)
+  etl.py                — SessionETL: session CSV → (s,a,r,s',done,mask) transitions
+  batch_train.py        — Nightly batch training CLI (python -m deployment.batch_train)
 ```
 
 ## Key Design Patterns

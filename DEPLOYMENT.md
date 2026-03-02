@@ -16,6 +16,7 @@ How to take the trained RL markdown pricing agent from POC to production. Covers
 8. [Safety and Guardrails](#safety-and-guardrails)
 9. [Monitoring Dashboard](#monitoring-dashboard)
 10. [Retraining and Maintenance](#retraining-and-maintenance)
+11. [Production Code Package (`deployment/`)](#production-code-package-deployment)
 
 ---
 
@@ -809,3 +810,144 @@ This means the model continuously adapts to:
 - **Post-holiday lulls**: Opposite effect. The agent adapts naturally through online learning, but monitor waste rates closely for 1-2 weeks after demand drops.
 - **Seasonal products**: Products that only appear seasonally (e.g., holiday items) should be treated as new SKUs each season — warm-start from pooled model, fine-tune as sessions accumulate.
 - **Inventory planning changes**: If `initial_inventory` changes significantly (e.g., store reduces markdown batch sizes), update the product master. The inventory_norm feature will shift, but the model adapts through online learning.
+
+---
+
+## Production Code Package (`deployment/`)
+
+The `deployment/` directory contains a complete production library implementing the architecture described above. It imports from the POC `fresh_rl/` package (DQNAgent, baselines, product_catalog) but never modifies it.
+
+### Package Structure
+
+```
+deployment/
+  __init__.py          — Package exports
+  config.py            — Constants, DQN defaults, ProductionConfig (path management)
+  state.py             — StateConstructor: builds 14-dim state from session data
+  session.py           — SessionManager + ActiveSession: daytime session tracking
+  inference.py         — PricingAgent: model loading with 3-tier fallback
+  etl.py               — SessionETL: session CSV → transition tuples
+  batch_train.py       — Nightly batch training CLI
+  data/
+    sessions/{date}/   — Session CSVs: S-{date}-{sku}.csv
+    product_master.csv — Product master data
+  models/
+    {sku_name}/        — Per-SKU checkpoints (agent.pt, agent_prev.pt)
+    _pooled/{category}/— Pooled category models (from POC v2)
+  logs/
+    batch_train_{date}.log   — Training logs
+    batch_report_{date}.json — Training reports
+```
+
+### Mapping to Architecture
+
+| Architecture Component | Implementation | Module |
+|----------------------|---------------|--------|
+| State constructor | `StateConstructor.build_state()` | `deployment/state.py` |
+| Session manager | `SessionManager` + `ActiveSession` | `deployment/session.py` |
+| Pricing service (inference) | `PricingAgent.get_discount()` | `deployment/inference.py` |
+| Historical ETL pipeline | `SessionETL.session_to_transitions()` | `deployment/etl.py` |
+| Training service | `train_single_sku()` | `deployment/batch_train.py` |
+| Model registry | `ProductionConfig` path methods | `deployment/config.py` |
+| Action mask enforcer | `ActiveSession.action_masks()` | `deployment/session.py` |
+
+### Daytime Usage (Library API)
+
+The caller's code (pricing service, scheduler) drives the daytime loop:
+
+```python
+from datetime import datetime
+from deployment import ProductionConfig, SessionManager, PricingAgent
+
+config = ProductionConfig(base_dir="deployment")
+config.ensure_dirs()
+
+manager = SessionManager(config)
+
+# 1. Start a session when a product enters markdown
+session = manager.start_session(
+    session_id="S-20260301-salmon",
+    sku_name="salmon_fillet",
+    category="seafood",
+    initial_inventory=10,
+    base_price=12.93,
+    cost_per_unit=6.21,
+    product_features=np.array([0.456, 0.202, 0.167, 0.000]),
+    start_time=datetime(2026, 3, 1, 8, 0),
+)
+
+# 2. Load the pricing model
+agent = PricingAgent(
+    sku_name="salmon_fillet",
+    category="seafood",
+    base_price=12.93,
+    cost_per_unit=6.21,
+    initial_inventory=10,
+    config=config,
+)
+source = agent.load_model()  # per-sku → pooled → baseline fallback
+
+# 3. Every 2 hours: get state → get discount → apply → observe → record
+state = manager.get_current_state("S-20260301-salmon")
+mask = session.action_masks()
+decision = agent.get_discount(state, mask)
+# decision = {"discount_idx": 2, "discount_pct": 0.30, "price": 9.05, ...}
+
+# ... caller applies price, waits 2h, observes sales ...
+
+manager.record_step(
+    session_id="S-20260301-salmon",
+    discount_idx=decision["discount_idx"],
+    units_sold=2,
+    inventory_after=8,
+    revenue=18.10,
+    timestamp=datetime(2026, 3, 1, 10, 0),
+)
+```
+
+### Nighttime Batch Training (CLI)
+
+After the day's sessions complete, run batch training:
+
+```bash
+# Train all SKUs on last 30 days of data
+python -m deployment.batch_train --date 2026-03-01 --workers 16
+
+# Train a single SKU
+python -m deployment.batch_train --date 2026-03-01 --sku salmon_fillet
+
+# Custom lookback window
+python -m deployment.batch_train --date 2026-03-01 --lookback-days 14 --workers 8
+```
+
+**What batch training does for each SKU:**
+
+1. Finds all session CSVs in `data/sessions/{date}/S-*-{sku}.csv` for the lookback window
+2. ETL: converts sessions → `(s, a, r, s', done, mask)` transition tuples
+3. Loads existing checkpoint, or cold-starts from pooled category model, or creates fresh agent
+4. Feeds transitions into replay buffer (with elevated PER priority)
+5. Runs `training_steps_per_session * n_sessions` gradient steps
+6. Rotates checkpoint: `agent.pt` → `agent_prev.pt` (rollback safety)
+7. Decays epsilon once per batch run
+8. Writes JSON report to `logs/batch_report_{date}.json`
+
+### Product Master CSV Format
+
+Place at `deployment/data/product_master.csv`:
+
+```csv
+sku_name,category,base_price,cost_per_unit,initial_inventory,pack_size,markdown_window_hours
+salmon_fillet,seafood,12.93,6.21,10,1,24
+yogurt_greek_plain,dairy,5.68,2.08,15,1,24
+sourdough_loaf,bakery,3.44,1.30,22,1,24
+```
+
+### Model Fallback Order
+
+`PricingAgent.load_model()` uses a 3-tier fallback:
+
+1. **Per-SKU checkpoint** (`models/{sku}/agent.pt`) — best, from batch training
+2. **Pooled category model** (`models/_pooled/{cat}/pooled_{cat}_plain_2h.pt`) — zero-shot
+3. **BackloadedProgressive baseline** — rule-based, no model needed
+
+During inference, any DQN error (NaN Q-values, load failure) automatically falls back to the baseline with logging.
