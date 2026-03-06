@@ -1435,7 +1435,7 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     for variant in ("plain", "shaped"):
         products_with_data.update(histories[variant].keys())
 
-    # best_reward_at[product][ep] = best reward at that episode
+    # best_reward_at[product][ep] = best reward at that episode (raw)
     best_reward_at = {}
     for product in products_with_data:
         best_reward_at[product] = {}
@@ -1457,19 +1457,33 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
             if best > -float("inf"):
                 best_reward_at[product][ep] = best
 
-    # Compute first_beat_episode per product
+    # Smooth per-product rewards with rolling average to reduce single-eval noise
+    smooth_window = 10
+    smoothed_reward_at = {}
+    for product in products_with_data:
+        smoothed_reward_at[product] = {}
+        raw_vals = []
+        for ep in episodes:
+            r = best_reward_at[product].get(ep)
+            if r is not None:
+                raw_vals.append(r)
+            if raw_vals:
+                window = raw_vals[-smooth_window:]
+                smoothed_reward_at[product][ep] = np.mean(window)
+
+    # Compute first_beat_episode per product (using smoothed rewards)
     first_beat = {}
     for product in products_with_data:
         bl = baseline_by_product.get(product)
         if bl is None:
             continue
         for ep in episodes:
-            r = best_reward_at[product].get(ep)
+            r = smoothed_reward_at[product].get(ep)
             if r is not None and r > bl:
                 first_beat[product] = ep
                 break
 
-    # Per-episode: cumulative % beating baseline + reward gap stats
+    # Per-episode: cumulative % beating baseline + reward gap stats (smoothed)
     cum_pct = []
     gap_mean, gap_p25, gap_p75 = [], [], []
     for ep in episodes:
@@ -1479,7 +1493,7 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
             bl = baseline_by_product.get(product)
             if bl is None:
                 continue
-            r = best_reward_at[product].get(ep)
+            r = smoothed_reward_at[product].get(ep)
             if r is None:
                 continue
             n += 1
