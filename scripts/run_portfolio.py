@@ -457,6 +457,7 @@ def _run_single_product(
         tl_epsilon_start=tl_epsilon_start,
         tl_epsilon_decay=tl_epsilon_decay,
         early_stop_patience=early_stop_patience,
+        greedy_eval_n=eval_episodes,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)

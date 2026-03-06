@@ -1373,7 +1373,7 @@ python scripts/run_portfolio.py --pooled-tl \
 
 ---
 
-## Iteration 23: Realistic Data Budget (v4.0 — 76% beats-baseline at 365 ep/SKU)
+## Iteration 23: Realistic Data Budget (v4.0 — 83% beats-baseline at 365 ep/SKU)
 
 **Context**: All prior pooled-TL results (v2.1 95%, v3.0 94%, v3.2 92%) used pooled models trained on 5000 ep/SKU — equivalent to ~14 years of daily markdown data per SKU. In production, only ~1 year (~365 days) of historical data is available. This iteration measures realistic time-to-value with 365 ep/SKU for both pooled training AND per-SKU fine-tuning.
 
@@ -1402,46 +1402,47 @@ python scripts/run_portfolio.py --pooled-tl \
     --save-dir results/portfolio_v40_365ep_pooled_tl
 ```
 
-**Results**: **114/150 (76%) beats-baseline** — pooled-TL still adds significant value even with realistic data budgets.
+**Results**: **124/150 (83%) beats-baseline** — pooled-TL delivers strong value even with realistic data budgets.
 
 | Metric | v4.0 (365ep) | v3.0 (5000+3000ep) | v2.1 (5000+5000ep) |
 |--------|-------------|-------------------|-------------------|
-| Beats baseline | 114/150 (76%) | 141/150 (94%) | 142/150 (95%) |
+| Beats baseline | 124/150 (83%) | 141/150 (94%) | 142/150 (95%) |
 | Pooled-only | 79/150 (53%) | N/A | N/A |
 | Pooled-only (5000ep) | — | — | 117/150 (78%) |
-| TL lift | +35 SKUs (+23pp) | — | — |
+| TL lift | +45 SKUs (+30pp) | — | — |
 | Runtime (pooled) | 10.2 min | — | ~180 min |
-| Runtime (TL) | 9.3 min | 82 min | ~160 min |
-| Total runtime | 19.5 min | 82+ min | 340+ min |
+| Runtime (TL) | 10.3 min | 82 min | ~160 min |
+| Total runtime | 20.5 min | 82+ min | 340+ min |
 
 **Category win rates** (v4.0 / v3.0):
 | Category | v4.0 (365ep) | v3.0 (5000+3000ep) | Delta |
 |----------|-------------|-------------------|-------|
-| deli_prepared | 91% (20/22) | 100% (22/22) | -9% |
-| vegetables | 86% (18/21) | 95% (20/21) | -10% |
-| fruits | 81% (17/21) | 95% (20/21) | -14% |
-| bakery | 76% (16/21) | 86% (18/21) | -10% |
-| dairy | 76% (16/21) | 100% (21/21) | -24% |
-| meats | 64% (14/22) | 95% (21/22) | -32% |
+| bakery | 90% (19/21) | 86% (18/21) | +5% |
+| dairy | 90% (19/21) | 100% (21/21) | -10% |
+| fruits | 90% (19/21) | 95% (20/21) | -5% |
+| vegetables | 90% (19/21) | 95% (20/21) | -5% |
+| deli_prepared | 86% (19/22) | 100% (22/22) | -14% |
+| meats | 73% (16/22) | 95% (21/22) | -23% |
 | seafood | 59% (13/22) | 86% (19/22) | -27% |
 
-**Time-to-value analysis** (from training progress plot):
-- Day 1 (after TL initialization): 77% already beating baseline — the pooled model provides immediate value
-- Day 50: peaks at ~92% — further fine-tuning improves most products
-- Final eval (day 365): 76% — slight regression suggests some products overfit with continued training
+**Time-to-value analysis** (100-episode greedy evals at each checkpoint, consistent with final eval):
+- Day 1 (after TL initialization): 68% already beating baseline — the pooled model provides immediate value
+- Day 50: 81% — rapid improvement in the first 50 days of online learning
+- Day 349: 86% — continued gradual improvement, plateauing
+- Final eval: 83% — consistent with the training curve (within noise)
 
 **Key observations**:
 
-1. **Pooled-TL still works at 365ep**: The pipeline lifts pooled-only from 53% → 76%, a +23pp gain. Transfer learning is even more valuable when data is scarce — without it, only half of products beat baseline.
+1. **Pooled-TL still works at 365ep**: The pipeline lifts pooled-only from 53% → 83%, a +30pp gain. Transfer learning is even more valuable when data is scarce — without it, only half of products beat baseline.
 
-2. **Meats and seafood hardest hit**: -32% and -27% vs v3.0 respectively. These categories have high price variance and complex demand patterns that need more data to learn. At 365ep/SKU, the pooled model hasn't converged for these categories.
+2. **Consistent evaluation matters**: An earlier run with 20-episode greedy evals during training showed only 76% final eval but 95% on the training curve — a misleading 19pp discrepancy caused by noisy single-checkpoint evaluations. Increasing training-time greedy evals to 100 episodes (matching the final eval) both fixed the chart consistency AND improved the final result to 83%, because the `best_greedy` checkpoint was selected more accurately.
 
-3. **Day 1 = 77% is strong**: Even with a weaker pooled model (365 vs 5000 ep/SKU), the TL initialization immediately beats baseline for 77% of products on day 1. In production, this means value from day one of deployment.
+3. **Seafood remains hardest**: 59% win rate, -27pp vs v3.0. High price variance products like poke_bowl, smoked_salmon, sardines need more pooled training data. Meats improved significantly (73% vs initial 64%) with better checkpoint selection.
 
-4. **Possible overfitting at 365ep**: The time-to-value curve peaks around day 50 then gradually declines, suggesting that 365 episodes may be too many for fine-tuning when the pooled model is weak. Future work: try early stopping with patience=100, or reduce fine-tuning to ~100-200 episodes.
+4. **26 non-winners, all near-ties**: Every non-winning product is within 6 reward of baseline (mean gap: -0.2). The system doesn't badly lose on any product — it either wins or ties.
 
-5. **19.5 min total runtime**: 5.4× faster than v3.0's 82+ min (which didn't include pooled training time). The realistic-budget experiment is dramatically cheaper to run.
+5. **Day 1 = 68% is production-ready**: Even before any online learning, TL initialization beats baseline for 2 out of 3 products. By day 50, this grows to 81%.
 
-6. **76% is production-viable**: Even with only 1 year of data, the system beats rule-based baselines for 3 out of 4 products. Combined with the 3-tier fallback in `deployment/inference.py` (per-SKU → pooled → baseline), non-winning products still get baseline-quality pricing.
+6. **20.5 min total runtime**: 4× faster than v3.0's 82+ min (which didn't include pooled training time). The realistic-budget experiment is dramatically cheaper to run.
 
-**Takeaway**: With realistic data budgets (365 ep/SKU), pooled-TL achieves 76% beats-baseline — an 18pp drop from the 94% at 5000+3000ep, but still production-viable. The biggest opportunity for improvement is the pooled model quality for meats/seafood categories. Possible mitigations: longer pooled training even with limited per-SKU data (pool across more SKUs), or data augmentation to synthetically expand the training set.
+**Takeaway**: With realistic data budgets (365 ep/SKU), pooled-TL achieves 83% beats-baseline — an 11pp drop from the 94% at 5000+3000ep, but production-viable with no badly-losing products. The biggest opportunity is improving pooled model quality for seafood. Consistent 100-episode evaluation during training is important — it both improves checkpoint selection and gives honest time-to-value metrics.

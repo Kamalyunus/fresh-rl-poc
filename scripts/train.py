@@ -51,6 +51,7 @@ def train(
     tl_epsilon_start: float = None,
     tl_epsilon_decay: float = None,
     early_stop_patience: int = None,
+    greedy_eval_n: int = 20,
 ):
     """Train a DQN agent and save results."""
 
@@ -208,9 +209,9 @@ def train(
     early_stopped = False
     early_stop_episode = None
 
-    # Greedy eval frequency: every 50 episodes, run 20 greedy episodes
+    # Greedy eval frequency: every 50 episodes
     eval_freq = 50
-    eval_n = 20
+    eval_n = greedy_eval_n
 
     def _greedy_eval():
         """Run greedy policy (epsilon=0) and return mean metrics."""

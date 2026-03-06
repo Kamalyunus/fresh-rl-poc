@@ -155,7 +155,7 @@ results/portfolio_v32_conservative_es/ — v3.2 results (92%, conservative early
 results/portfolio_v40_365ep_pooled/    — v4.0 pooled models (53%, 365ep/SKU realistic budget)
   _pooled_{category}/                  — Category model checkpoints (.pt)
 
-results/portfolio_v40_365ep_pooled_tl/ — v4.0 TL results (76%, 365ep realistic budget)
+results/portfolio_v40_365ep_pooled_tl/ — v4.0 TL results (83%, 365ep realistic budget)
 
 results/portfolio_v2_pooled/           — Pooled category models (v2, 78%)
   _pooled_{category}/                  — Category model checkpoints (.pt, used by TL)
