@@ -701,10 +701,13 @@ action = argmax(q_values)
 |---------|---------|-----------|
 | Fresh agent (no history) | 0.30 | Pooled model provides reasonable base, moderate exploration |
 | After warmup from history | 0.05 - 0.10 | Already warm-started, mostly exploit |
-| Steady state | 0.02 - 0.05 | Minimal exploration to track distribution shifts |
+| Steady state | 0.05 (floor) | `EPSILON_FLOOR=0.05` prevents over-exploitation in production |
+| After safety rollback | 0.15 | `EPSILON_DEGRADATION_RESET=0.15` — re-explore after degradation |
 | Emergency override | 0.00 | Pure exploitation when stability is critical |
 
 With `hold_action_prob = 0.5`, half of random explorations choose "hold current discount" rather than a random deeper cut. This prevents needlessly aggressive exploration.
+
+The epsilon floor ensures the agent never stops exploring entirely, which is critical for adapting to demand distribution shifts. After a safety rollback, epsilon resets to 0.15 to increase exploration while the model recovers.
 
 ### Fallback Policy
 
@@ -739,6 +742,24 @@ except Exception:
 | Discount too aggressive | Jump 3+ levels in one step | Block (impose max 2-level jump per step) |
 | Q-value divergence | max Q > 1000 or NaN | Halt training, reload last checkpoint |
 
+### Automatic Safety Rollback
+
+Batch training includes automatic safety rollback based on model quality metrics. After each nightly training run, `should_rollback()` compares current and previous metrics:
+
+| Check | Threshold | Action |
+|-------|-----------|--------|
+| Avg Q-value drop | > 30% (`ROLLBACK_Q_DROP_THRESHOLD`) | Restore `agent_prev.pt`, reset epsilon to 0.15 |
+| Mean loss spike | > 3x (`ROLLBACK_LOSS_SPIKE_THRESHOLD`) | Restore `agent_prev.pt`, reset epsilon to 0.15 |
+
+The rollback process:
+1. Copy `agent_prev.pt` back to `agent.pt`
+2. Copy `metrics_prev.json` back to `metrics.json`
+3. Reset `agent.epsilon = EPSILON_DEGRADATION_RESET` (0.15)
+4. Re-save checkpoint with reset epsilon
+5. Log rollback event and reason in batch report
+
+Rollback is safe because checkpoints are always rotated (`agent.pt` → `agent_prev.pt`) before saving new weights. The `rolled_back` flag in the batch report enables monitoring.
+
 ---
 
 ## Monitoring Dashboard
@@ -754,8 +775,10 @@ except Exception:
 | **Average discount depth** | Per-category | > 55% avg across category | Agent may be too aggressive |
 | **Revenue per unit** | Per-SKU | < cost_per_unit | Selling below cost consistently |
 | **Epsilon** | Per-SKU | Stuck at > 0.20 after 1000 steps | Decay not working or agent reset |
-| **Training loss** | Per-SKU | > 100 or NaN | Network diverging |
+| **Training loss** | Per-SKU | > 100 or NaN, or 3x spike from prev | Network diverging (auto-rollback triggers) |
+| **Avg Q-value** | Per-SKU | Drop > 30% from previous run | Model confidence degraded (auto-rollback triggers) |
 | **Replay buffer size** | Per-SKU | < 500 after 50 sessions | Buffer not filling (data pipeline issue) |
+| **Safety rollbacks** | Per-SKU, portfolio | > 5% of SKUs rolled back in one night | Widespread training instability |
 | **Inference latency** | Service-wide | p99 > 50ms | Model or data lookup too slow |
 | **Fallback rate** | Service-wide | > 1% of decisions | Model errors too frequent |
 
@@ -789,13 +812,17 @@ This means the model continuously adapts to:
 | Model performance degraded for > 4 weeks despite online learning | Rebuild replay buffer from recent 8 weeks of data, retrain from scratch |
 | Algorithm upgrade (new architecture, new features) | Full retrain on historical data with new code |
 
+### Keeping Pooled Models Fresh
+
+Run `--pooled-update` weekly (e.g., Sunday night) to retrain category-level pooled models from the last 30 days of cross-SKU session data. This ensures new SKUs cold-start from models trained on recent production data rather than stale POC models.
+
 ### Handling New SKUs
 
 1. Add the SKU to the product master with correct category, price, cost, inventory, pack_size
 2. Compute product features using category normalization ranges
 3. Load the pooled category model: `agent.load_pretrained("pooled_{category}_plain_2h.pt")`
 4. The pooled model provides zero-shot pricing from the first session (78% beats-baseline in POC)
-5. After ~50 markdown sessions, optionally fine-tune with the pooled TL approach for better performance
+5. After ~50 markdown sessions, nightly batch training automatically fine-tunes from pooled model (cold-start path)
 
 ### Handling Removed SKUs
 
@@ -832,8 +859,8 @@ deployment/
     sessions/{date}/   — Session CSVs: S-{date}-{sku}.csv
     product_master.csv — Product master data
   models/
-    {sku_name}/        — Per-SKU checkpoints (agent.pt, agent_prev.pt)
-    _pooled/{category}/— Pooled category models (from POC v2)
+    {sku_name}/        — Per-SKU checkpoints (agent.pt, agent_prev.pt, metrics.json, buffer.pt)
+    _pooled/{category}/— Pooled category models (auto-updated weekly with --pooled-update)
   logs/
     batch_train_{date}.log   — Training logs
     batch_report_{date}.json — Training reports
@@ -848,6 +875,8 @@ deployment/
 | Pricing service (inference) | `PricingAgent.get_discount()` | `deployment/inference.py` |
 | Historical ETL pipeline | `SessionETL.session_to_transitions()` | `deployment/etl.py` |
 | Training service | `train_single_sku()` | `deployment/batch_train.py` |
+| Safety rollback | `should_rollback()` | `deployment/batch_train.py` |
+| Pooled model update | `train_pooled_category()` | `deployment/batch_train.py` |
 | Model registry | `ProductionConfig` path methods | `deployment/config.py` |
 | Action mask enforcer | `ActiveSession.action_masks()` | `deployment/session.py` |
 
@@ -918,6 +947,12 @@ python -m deployment.batch_train --date 2026-03-01 --sku salmon_fillet
 
 # Custom lookback window
 python -m deployment.batch_train --date 2026-03-01 --lookback-days 14 --workers 8
+
+# Weekly: train all SKUs + retrain pooled category models
+python -m deployment.batch_train --date 2026-03-01 --workers 16 --pooled-update
+
+# Custom pooled lookback window
+python -m deployment.batch_train --date 2026-03-01 --workers 16 --pooled-update --pooled-lookback-days 60
 ```
 
 **What batch training does for each SKU:**
@@ -925,11 +960,24 @@ python -m deployment.batch_train --date 2026-03-01 --lookback-days 14 --workers 
 1. Finds all session CSVs in `data/sessions/{date}/S-*-{sku}.csv` for the lookback window
 2. ETL: converts sessions → `(s, a, r, s', done, mask)` transition tuples
 3. Loads existing checkpoint, or cold-starts from pooled category model, or creates fresh agent
-4. Feeds transitions into replay buffer (with elevated PER priority)
-5. Runs `training_steps_per_session * n_sessions` gradient steps
-6. Rotates checkpoint: `agent.pt` → `agent_prev.pt` (rollback safety)
-7. Decays epsilon once per batch run
-8. Writes JSON report to `logs/batch_report_{date}.json`
+4. Loads persisted replay buffer (`buffer.pt`) if available — preserves PER priorities across runs
+5. Feeds transitions into replay buffer (with elevated PER priority)
+6. Runs `training_steps_per_session * n_sessions` gradient steps, tracking losses
+7. Decays epsilon once per batch run, clamped to `EPSILON_FLOOR` (0.05)
+8. Computes model metrics: `avg_q_value` (mean max Q from sampled states) and `mean_loss` (last 100 steps)
+9. Rotates checkpoint: `agent.pt` → `agent_prev.pt` and `metrics.json` → `metrics_prev.json`
+10. Saves new checkpoint, replay buffer (`buffer.pt`), and metrics (`metrics.json`)
+11. **Safety rollback check**: if avg_q drops >30% or loss spikes >3x, restores previous checkpoint and resets epsilon to 0.15
+12. Writes JSON report to `logs/batch_report_{date}.json` (includes metrics, rollback info)
+
+**Weekly pooled model update** (`--pooled-update`):
+
+After per-SKU training, retrains each category's pooled model from cross-SKU session data:
+1. Groups SKUs by category
+2. Collects all transitions across SKUs in each category (with product features)
+3. Trains category-level agent for `POOLED_EPISODES_PER_SKU * n_skus` steps
+4. Rotates pooled model: `pooled_{cat}_plain_2h.pt` → `pooled_{cat}_plain_2h_prev.pt`
+5. Saves updated pooled model (used for cold-starting new SKUs)
 
 ### Product Master CSV Format
 

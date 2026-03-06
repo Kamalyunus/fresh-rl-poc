@@ -1142,3 +1142,44 @@ python scripts/run_portfolio.py --pooled-tl \
 **9 non-winners** (all near-ties): bacon_pack (-4.5), poke_bowl (-4.7), smoked_salmon_4oz (-4.2), pretzel_rolls_6pk (-2.7), cinnamon_rolls_4pk (-1.1), fish_tacos_kit (-0.6), danish_pastry_4pk (-0.5), mixed_berries_12oz (-0.1), salad_mix_5oz (-0.1).
 
 **Takeaway**: v3.0 matches v2.1 performance with 40% fewer episodes. The tau warming schedule + TL warmup skip + mixed prefill collectively enable faster convergence without sacrificing quality. The 1pp beats-baseline gap (94% vs 95%) is within noise — mean shaped reward is essentially identical (143.0 vs 143.3). Shaping wins improved from 44% to 48%, suggesting the diverse prefill mix helps shaped agents more.
+
+---
+
+## Iteration 19: Production Hardening (5 Improvements)
+
+**Commit**: `f00f9f1`
+
+**Context**: With v3.0 achieving 94% beats-baseline and the deployment pipeline (`deployment/`) handling nightly per-SKU training, production hardening is needed before real-world deployment. No simulator is available in production, so proxy quality metrics replace evaluation rollouts.
+
+**Changes** (5 improvements to `deployment/batch_train.py` and supporting modules):
+
+### 1. Model metrics tracking
+- After each training run, compute `avg_q_value` (mean max Q from 100 sampled states) and `mean_loss` (mean over last 100 gradient steps)
+- `DQNAgent.compute_avg_q(states)` method added
+- Metrics written to `metrics.json` alongside checkpoint, rotated to `metrics_prev.json`
+
+### 2. Epsilon floor + degradation reset
+- Production epsilon clamped to `EPSILON_FLOOR=0.05` after each decay — prevents over-exploitation
+- `EPSILON_DEGRADATION_RESET=0.15` — raised epsilon after safety rollback to encourage re-exploration
+
+### 3. Safety rollback
+- `should_rollback()` compares current and previous `metrics.json`
+- Triggers on: avg_q drop > 30% (`ROLLBACK_Q_DROP_THRESHOLD`) or loss spike > 3x (`ROLLBACK_LOSS_SPIKE_THRESHOLD`)
+- Rollback: restores `agent_prev.pt` → `agent.pt`, resets epsilon to 0.15, logs reason
+- `rolled_back` flag in batch report enables monitoring
+
+### 4. Buffer persistence
+- PER buffer saved to `buffer.pt` after training, loaded at start of next run
+- `PrioritizedReplayBuffer.save()/load()` preserves transitions, priorities, `max_priority`, `sample_step`
+- Plain `ReplayBuffer.save()/load()` for non-PER agents
+- `DQNAgent.save_buffer()/load_buffer()` delegates to buffer
+
+### 5. Weekly pooled model update
+- `train_pooled_category()` retrains category-level pooled models from cross-SKU production session data
+- `--pooled-update` CLI flag triggers after per-SKU training
+- `--pooled-lookback-days` (default 30) controls data window
+- Pooled models rotated: `pooled_{cat}_plain_2h.pt` → `pooled_{cat}_plain_2h_prev.pt`
+
+**Files modified**: `deployment/config.py`, `deployment/batch_train.py`, `fresh_rl/dqn_agent.py`, `fresh_rl/prioritized_replay.py`
+
+**Takeaway**: These are infrastructure improvements for production safety, not algorithm changes. No impact on POC training results. The metrics/rollback system provides automated guardrails against model degradation without human intervention, buffer persistence enables incremental learning across nightly runs, and weekly pooled updates keep cold-start models fresh with production data.

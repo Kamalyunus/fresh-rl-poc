@@ -55,6 +55,9 @@ python -m deployment.batch_train --date 2026-03-01 --workers 16
 
 # Nightly batch training (single SKU)
 python -m deployment.batch_train --date 2026-03-01 --sku salmon_fillet
+
+# Nightly batch training + weekly pooled model update
+python -m deployment.batch_train --date 2026-03-01 --workers 16 --pooled-update
 ```
 
 ## Architecture
@@ -64,10 +67,10 @@ fresh_rl/
   product_catalog.py    — 150 SKUs, 7 categories, get_product_features() for pooled mode
   environment.py        — MarkdownChannelEnv (base), MarkdownProductEnv (per-product wrapper)
   pooled_env.py         — PooledCategoryEnv, AugmentedProductEnv (14-dim state wrappers)
-  dqn_agent.py          — Double DQN, action masking, PER, n-step, reward shaping
+  dqn_agent.py          — Double DQN, action masking, PER, n-step, reward shaping, buffer persistence
   baselines.py          — 7 rule-based policies
   historical_data.py    — Replay buffer pre-filling from baseline rollouts
-  prioritized_replay.py — PER buffer with SumTree
+  prioritized_replay.py — PER buffer with SumTree, save/load persistence
   sumtree.py            — SumTree data structure
 
 scripts/
@@ -77,12 +80,12 @@ scripts/
   visualize.py          — Single-product + portfolio visualizations (10 portfolio plots)
 
 deployment/
-  config.py             — Constants, DQN defaults, ProductionConfig (path management)
+  config.py             — Constants, DQN defaults, metrics/safety thresholds, ProductionConfig (path management)
   state.py              — StateConstructor: 14-dim state from session data
   session.py            — SessionManager + ActiveSession: daytime session tracking + CSV logging
   inference.py          — PricingAgent: 3-tier model fallback (per-SKU → pooled → baseline)
   etl.py                — SessionETL: session CSV → (s,a,r,s',done,mask) transitions
-  batch_train.py        — Nightly batch training CLI (python -m deployment.batch_train)
+  batch_train.py        — Nightly batch training CLI with metrics, safety rollback, buffer persistence, pooled update
 ```
 
 ## Key Design Patterns
@@ -95,6 +98,11 @@ deployment/
 - **Pooled TL (v2.1)**: `AugmentedProductEnv` wraps per-SKU env to append 4 product features (10->14 dim), matching pooled model input. Pooled weights transfer directly via `load_pretrained()` — no weight surgery needed.
 - **Evaluation**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Same function used for both per-SKU and pooled modes.
 - **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either.
+- **Model metrics**: `compute_avg_q()` and `mean_loss` tracked as proxy quality signals in production (no simulator). Written to `metrics.json` alongside checkpoints.
+- **Safety rollback**: Auto-reverts to `agent_prev.pt` when avg_q drops >30% or loss spikes >3x. Resets epsilon to 0.15 for re-exploration.
+- **Epsilon floor**: Production epsilon clamped to `EPSILON_FLOOR=0.05` to prevent over-exploitation.
+- **Buffer persistence**: PER buffer saved/loaded across nightly training runs via `save_buffer()`/`load_buffer()`. Preserves priorities and sampling state.
+- **Weekly pooled update**: `--pooled-update` flag retrains category-level pooled models from cross-SKU session data, keeping cold-start models fresh.
 
 ## Important Constraints
 

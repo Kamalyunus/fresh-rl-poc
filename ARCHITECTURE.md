@@ -618,6 +618,25 @@ This guarantees coverage across the priority distribution — the batch isn't do
 6. Update network with corrected gradients
 ```
 
+### Buffer Persistence
+
+In production, the PER buffer is saved to disk after each nightly training run and loaded at the start of the next. This preserves learned priority structure across runs:
+
+```
+save():
+  1. Extract all transitions from tree.data[:tree.size]
+  2. Extract leaf priorities from tree.tree[i + capacity - 1] for i in [0, size)
+  3. Save transitions, priorities, max_priority, and sample_step via torch.save()
+
+load():
+  1. Load saved data from disk
+  2. Push each transition via push() (uses max_priority initially)
+  3. Fix each transition's priority to the saved value via tree.update()
+  4. Restore max_priority and sample_step
+```
+
+The plain `ReplayBuffer` also supports `save()`/`load()` for non-PER agents. The `DQNAgent` delegates via `save_buffer()`/`load_buffer()`.
+
 ---
 
 ## SumTree Data Structure
@@ -1489,6 +1508,49 @@ All steps within one episode are for the same product — the n-step accumulator
 | Per-SKU (v1.4) | 300 | 86% | No — requires training |
 | Pooled (v2) | 14 | 78% | **Yes** — compute features, use category model |
 | Old TL (v1.3.2) | 300 | 71% | No — requires fine-tuning |
+
+---
+
+## Production Hardening
+
+### Model Quality Metrics
+
+In production, without a simulator for evaluation rollouts, model quality is tracked via proxy metrics computed after each nightly training run:
+
+| Metric | Computation | Purpose |
+|--------|-------------|---------|
+| `avg_q_value` | Mean max Q-value over a sample of 100 buffer states | Proxy for model confidence — drops indicate degradation |
+| `mean_loss` | Mean training loss over last 100 gradient steps (`METRICS_WINDOW`) | Training stability — spikes indicate divergence |
+| `epsilon` | Current exploration rate | Tracks exploration decay |
+| `n_transitions` | Total transitions in this training batch | Data volume proxy |
+
+Metrics are written to `metrics.json` alongside the checkpoint. Previous metrics are rotated to `metrics_prev.json` for comparison.
+
+### Safety Rollback
+
+Automatic rollback triggers when metrics degrade beyond thresholds:
+
+```
+should_rollback(metrics_path, prev_metrics_path):
+  Load current and previous metrics
+  If avg_q drops > 30% (ROLLBACK_Q_DROP_THRESHOLD):   ROLLBACK
+  If mean_loss spikes > 3x (ROLLBACK_LOSS_SPIKE_THRESHOLD): ROLLBACK
+  Otherwise: no rollback
+```
+
+Rollback restores `agent_prev.pt` → `agent.pt` and `metrics_prev.json` → `metrics.json`, then resets epsilon to `EPSILON_DEGRADATION_RESET` (0.15) for re-exploration.
+
+### Epsilon Floor
+
+Production epsilon is clamped to `EPSILON_FLOOR` (0.05) after each decay step, preventing complete exploitation. This ensures ongoing exploration to adapt to demand distribution shifts.
+
+### Buffer Persistence
+
+The replay buffer is persisted to `buffer.pt` after each training run and loaded at the start of the next. For PER buffers, priorities and sampling state (`sample_step`) are preserved, ensuring the importance-sampling beta annealing continues smoothly across runs.
+
+### Weekly Pooled Model Update
+
+Category-level pooled models can be retrained from cross-SKU production data via `--pooled-update`. This keeps cold-start models fresh with recent data rather than relying on stale POC models. Each category trains for `POOLED_EPISODES_PER_SKU * n_skus` gradient steps on pooled transitions.
 
 ---
 

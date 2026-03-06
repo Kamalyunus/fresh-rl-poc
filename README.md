@@ -36,6 +36,7 @@ This POC models the markdown channel as a **Markov Decision Process (MDP)** and 
 - **Pooled transfer learning** (v2.1): uses pooled model weights as initialization for per-SKU fine-tuning via `AugmentedProductEnv` (14-dim state) — best overall at 95% beats-baseline
 - **Portfolio runner** for cross-category validation with parallel workers (per-SKU and pooled modes)
 - **Visualization suite**: per-product plots (training curves, policy heatmaps, episode walkthroughs, revenue-waste Pareto) + comprehensive portfolio plots (dashboard, DQN-vs-baseline scatter, category win rates, reward gap distribution, per-SKU gaps, baseline difficulty, revenue-waste comparison, three-way DQN/shaped/baseline comparison)
+- **Production hardening**: model quality metrics (avg Q-value, mean loss), automatic safety rollback on degradation, epsilon floor (0.05) with degradation reset (0.15), PER buffer persistence across training runs, weekly pooled model retraining from production data
 
 ## Project Structure
 
@@ -44,11 +45,11 @@ fresh-rl-poc/
 ├── fresh_rl/
 │   ├── __init__.py
 │   ├── environment.py          # MarkdownChannelEnv + MarkdownProductEnv
-│   ├── dqn_agent.py            # Double DQN with action masking (PyTorch)
+│   ├── dqn_agent.py            # Double DQN with action masking, buffer persistence (PyTorch)
 │   ├── baselines.py            # 7 rule-based markdown policies
 │   ├── product_catalog.py      # 150 SKUs across 7 categories
 │   ├── pooled_env.py           # PooledCategoryEnv for category-level training
-│   ├── prioritized_replay.py   # PER with SumTree
+│   ├── prioritized_replay.py   # PER with SumTree, save/load persistence
 │   ├── sumtree.py              # SumTree data structure for PER
 │   └── historical_data.py      # Baseline replay buffer pre-filling
 ├── scripts/
@@ -56,10 +57,18 @@ fresh-rl-poc/
 │   ├── evaluate.py             # Evaluation: DQN vs baselines
 │   ├── visualize.py            # Visualization suite (per-product + portfolio)
 │   └── run_portfolio.py        # Portfolio runner (all SKUs, parallel)
-├── results/                    # Output directory (gitignored)
+├── deployment/
+│   ├── config.py                  # Constants, safety thresholds, ProductionConfig
+│   ├── state.py                   # StateConstructor: 14-dim state from session data
+│   ├── session.py                 # SessionManager + ActiveSession: daytime tracking
+│   ├── inference.py               # PricingAgent: 3-tier model fallback
+│   ├── etl.py                     # SessionETL: session CSV → transitions
+│   └── batch_train.py             # Nightly training with metrics, rollback, buffer persistence
+├── results/                       # Output directory (gitignored)
 ├── requirements.txt
-├── EXPERIMENTS.md              # Iteration history and learnings
-├── ARCHITECTURE.md             # Technical architecture documentation
+├── DEPLOYMENT.md                  # Production deployment guide
+├── EXPERIMENTS.md                 # Iteration history and learnings
+├── ARCHITECTURE.md                # Technical architecture documentation
 └── README.md
 ```
 
