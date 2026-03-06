@@ -1315,3 +1315,58 @@ v3.1 shows higher day-1 % (93% vs 88%) due to the lower TL epsilon start (0.15 v
 **Output**: `portfolio_time_to_value.png` (11th portfolio plot)
 
 **Takeaway**: Transfer learning delivers immediate value — 88% of products beat baseline on day 1 with no fine-tuning. The visualization makes this concrete for stakeholders: deploy on Monday, 88% of products are already pricing better than rules by Tuesday. The remaining 12% converge within ~50 days. The carry-forward fix also corrects survivorship bias in the existing training progress plot for early-stopped runs.
+
+---
+
+## Iteration 22: Conservative Early Stopping (v3.2 — 92% beats-baseline)
+
+**Context**: v3.1 regressed to 87% by stacking 4 aggressive changes. Hypothesis: use v3.0's tau schedule with only early stopping (patience=2000) and replay_ratio=1 to recover v3.0's 94% while saving compute on converged products.
+
+**Run command**:
+```bash
+python scripts/run_portfolio.py --pooled-tl \
+    --pooled-model-dir results/portfolio_v2_pooled \
+    --episodes 3000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000 \
+    --early-stop-patience 2000 \
+    --replay-ratio 1
+```
+
+**Results**: **138/150 (92%) beats-baseline** at 3000ep (76 min, 16 workers)
+
+| Metric | v3.0 (94%) | v3.1 (87%) | v3.2 (92%) |
+|--------|------------|------------|------------|
+| Beats baseline | 141/150 | 130/150 | 138/150 |
+| Shaping wins | 72/150 (48%) | 59/150 (39%) | 66/150 (44%) |
+| Mean shaped reward | 143.0 | 141.6 | 142.0 |
+| Mean plain reward | — | — | 142.8 |
+| Runtime | 82 min | 104 min | 76 min |
+| Early stopped | N/A | 87% (261/300) | 0% (0/300) |
+
+**Category win rates** (v3.2 / v3.0 / v3.1):
+| Category | v3.2 | v3.0 | v3.1 |
+|----------|------|------|------|
+| deli_prepared | 100% (22/22) | 100% (22/22) | 100% (22/22) |
+| dairy | 95% (20/21) | 100% (21/21) | 90% (19/21) |
+| fruits | 95% (20/21) | 95% (20/21) | 90% (19/21) |
+| vegetables | 95% (20/21) | 95% (20/21) | 90% (19/21) |
+| bakery | 90% (19/21) | 86% (18/21) | 81% (17/21) |
+| meats | 86% (19/22) | 95% (21/22) | 77% (17/22) |
+| seafood | 82% (18/22) | 86% (19/22) | 77% (17/22) |
+
+**12 non-winners**: poke_bowl (-3.2), smoked_salmon_4oz (-3.6), scallops_8oz (-1.5), veal_cutlet (-1.5), duck_breast (-1.3), pretzel_rolls_6pk (-1.0), salad_mix_5oz (+0.3), mixed_berries_12oz (+0.5), bacon_pack (+0.6), gruyere_wedge_6oz (+1.2), croissants_4pk (+1.7), salmon_fillet (+7.1). Half have positive gaps (ties, not losses).
+
+**Key observations**:
+
+1. **Early stopping never fired**: patience=2000 at eval_freq=50 means 40 consecutive evals without improvement needed to stop. With 3000 total episodes, the earliest possible stop is episode 2050. No product was stagnant long enough. Early stopping with patience=2000 is effectively a no-op at 3000ep — would need 5000ep+ to have meaningful effect.
+
+2. **TL epsilon explains the gap vs v3.0**: We didn't override `--tl-epsilon-start` / `--tl-epsilon-decay`, so v3.1's defaults (0.15/0.997) were used instead of v3.0's original 0.3. The training logs confirm `Fine-tuning epsilon: 0.15, decay: 0.997`. This isolates the epsilon impact: 0.15 start loses ~2% wins vs 0.3 start (94% → 92%), with meats (-9%) and seafood (-4%) most affected.
+
+3. **Fastest runtime**: 76 min (vs 82 for v3.0, 104 for v3.1). Likely minor variance — same config as v3.0 except TL epsilon.
+
+4. **Bakery improved**: 90% (v3.2) vs 86% (v3.0) — faster epsilon convergence benefits bakery's simpler pricing landscape.
+
+**Takeaway**: The 2% gap vs v3.0 is entirely attributable to the faster TL epsilon schedule (0.15 vs 0.3), not replay ratio or early stopping. To truly match v3.0, pass `--tl-epsilon-start 0.3`. The v3.1 early stopping infrastructure works correctly but patience=2000 is too conservative for 3000-episode runs. For future runs at 5000ep, patience=2000 should save meaningful compute on converged products.
