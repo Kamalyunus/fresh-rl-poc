@@ -1532,13 +1532,10 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     fig.suptitle("Time to Value — RL Model Convergence After Deployment",
                  fontsize=14, fontweight="bold")
 
-    # Panel 1: Cumulative % beating baseline (hero chart)
+    # Panel 1: % beating baseline over time (hero chart)
     ax = axes[0, 0]
     ax.plot(ep_500, cum_500, color="#27AE60", linewidth=2.5, zorder=3)
     ax.fill_between(ep_500, cum_500, alpha=0.15, color="#27AE60")
-    final_pct = sum(1 for r in ok_results if r.get("beats_baseline")) / len(ok_results) * 100
-    ax.axhline(final_pct, color="gray", linestyle="--", alpha=0.5,
-               label=f"Final eval: {final_pct:.0f}%")
     # Annotate day 1
     if len(cum_500) > 0:
         day1_val = cum_500[0]
@@ -1554,11 +1551,19 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
                     xytext=(ep_500[idx_50] + 40, day50_val - 8),
                     fontsize=9, fontweight="bold", color="#27AE60",
                     arrowprops=dict(arrowstyle="->", color="#27AE60", lw=1.2))
+    # Annotate final day
+    if len(cum_500) > 1:
+        final_ep = ep_500[-1]
+        final_val = cum_500[-1]
+        ax.annotate(f"Day {final_ep:.0f}: {final_val:.0f}%",
+                    xy=(final_ep, final_val),
+                    xytext=(final_ep - 100, final_val - 10),
+                    fontsize=9, fontweight="bold", color="#27AE60",
+                    arrowprops=dict(arrowstyle="->", color="#27AE60", lw=1.2))
     ax.set_xlabel("Episode (= Day in Production)")
     ax.set_ylabel("% of Products Beating Baseline")
-    ax.set_title("Cumulative % Beating Baseline")
+    ax.set_title("% Beating Baseline Over Time")
     ax.set_ylim(0, 105)
-    ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
     # Panel 2: Day-1 performance by category
