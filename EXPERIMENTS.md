@@ -1425,24 +1425,24 @@ python scripts/run_portfolio.py --pooled-tl \
 | meats | 73% (16/22) | 95% (21/22) | -23% |
 | seafood | 59% (13/22) | 86% (19/22) | -27% |
 
-**Time-to-value analysis** (100-episode greedy evals at each checkpoint, consistent with final eval):
-- Day 1 (after TL initialization): 68% already beating baseline — the pooled model provides immediate value
-- Day 50: 81% — rapid improvement in the first 50 days of online learning
-- Day 349: 86% — continued gradual improvement, plateauing
-- Final eval: 83% — consistent with the training curve (within noise)
+**Time-to-value analysis** (actual daily session rewards, 1 session/day per SKU with exploration, 30-day rolling average):
+- Day 1: 60% beating baseline — single real session with exploration noise, majority already winning
+- Day 365: 76% (30-day avg) — steady improvement over the full year
+- Median days to beat baseline: 0 (most products win immediately from TL initialization)
+- Mean days to beat baseline: 7 — nearly all products that will win do so within the first week
 
 **Key observations**:
 
 1. **Pooled-TL still works at 365ep**: The pipeline lifts pooled-only from 53% → 83%, a +30pp gain. Transfer learning is even more valuable when data is scarce — without it, only half of products beat baseline.
 
-2. **Consistent evaluation matters**: An earlier run with 20-episode greedy evals during training showed only 76% final eval but 95% on the training curve — a misleading 19pp discrepancy caused by noisy single-checkpoint evaluations. Increasing training-time greedy evals to 100 episodes (matching the final eval) both fixed the chart consistency AND improved the final result to 83%, because the `best_greedy` checkpoint was selected more accurately.
+2. **Consistent evaluation matters**: Training-time greedy evals now use the same 100 episodes as the final eval (was 20). This improved checkpoint selection, raising the final result from 76% to 83%.
 
 3. **Seafood remains hardest**: 59% win rate, -27pp vs v3.0. High price variance products like poke_bowl, smoked_salmon, sardines need more pooled training data. Meats improved significantly (73% vs initial 64%) with better checkpoint selection.
 
 4. **26 non-winners, all near-ties**: Every non-winning product is within 6 reward of baseline (mean gap: -0.2). The system doesn't badly lose on any product — it either wins or ties.
 
-5. **Day 1 = 68% is production-ready**: Even before any online learning, TL initialization beats baseline for 2 out of 3 products. By day 50, this grows to 81%.
+5. **Immediate value from TL**: 60% of products beat baseline on day 1 (single real session with exploration). Most products that will eventually win do so within the first week (median: 0 days, mean: 7 days).
 
 6. **20.5 min total runtime**: 4× faster than v3.0's 82+ min (which didn't include pooled training time). The realistic-budget experiment is dramatically cheaper to run.
 
-**Takeaway**: With realistic data budgets (365 ep/SKU), pooled-TL achieves 83% beats-baseline — an 11pp drop from the 94% at 5000+3000ep, but production-viable with no badly-losing products. The biggest opportunity is improving pooled model quality for seafood. Consistent 100-episode evaluation during training is important — it both improves checkpoint selection and gives honest time-to-value metrics.
+**Takeaway**: With realistic data budgets (365 ep/SKU), pooled-TL achieves 83% beats-baseline (final eval) with a 30-day rolling average of 76% on actual daily sessions. The 11pp drop from v3.0's 94% is modest given the 14× reduction in data. No product badly loses — all 26 non-winners are within 6 reward of baseline.
