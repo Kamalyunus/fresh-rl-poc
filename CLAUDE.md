@@ -34,13 +34,22 @@ python scripts/run_portfolio.py --pooled --pooled-episodes-per-sku 5000 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 --workers 7
 
-# Run pooled->per-SKU transfer learning (best: v2.1, 95%)
+# Run pooled->per-SKU transfer learning (v2.1, 95% at 5000ep)
 python scripts/run_portfolio.py --pooled-tl \
     --pooled-model-dir results/portfolio_v2_pooled \
     --episodes 5000 --eval-episodes 100 \
     --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
+
+# Run pooled TL with v3.0 tau schedule (94% at 3000ep, 49% faster)
+python scripts/run_portfolio.py --pooled-tl \
+    --pooled-model-dir results/portfolio_v2_pooled \
+    --episodes 3000 --eval-episodes 100 \
+    --step-hours 2 --per --prefill --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000
 
 # Visualize portfolio results
 python scripts/visualize.py --portfolio results/portfolio_v21_pooled_tl/portfolio_results.json
@@ -56,8 +65,15 @@ python -m deployment.batch_train --date 2026-03-01 --workers 16
 # Nightly batch training (single SKU)
 python -m deployment.batch_train --date 2026-03-01 --sku salmon_fillet
 
+# Custom lookback window
+python -m deployment.batch_train --date 2026-03-01 --lookback-days 14 --workers 8
+
 # Nightly batch training + weekly pooled model update
 python -m deployment.batch_train --date 2026-03-01 --workers 16 --pooled-update
+
+# Pooled update with custom lookback
+python -m deployment.batch_train --date 2026-03-01 --workers 16 \
+    --pooled-update --pooled-lookback-days 60
 ```
 
 ## Architecture
@@ -77,7 +93,7 @@ scripts/
   train.py              — Single-product training loop
   evaluate.py           — evaluate_policy() for greedy rollouts
   run_portfolio.py      — Portfolio runner (per-SKU, pooled, and pooled-TL modes)
-  visualize.py          — Single-product + portfolio visualizations (10 portfolio plots)
+  visualize.py          — Single-product + portfolio visualizations (11 portfolio plots)
 
 deployment/
   config.py             — Constants, DQN defaults, metrics/safety thresholds, ProductionConfig (path management)
@@ -103,6 +119,10 @@ deployment/
 - **Epsilon floor**: Production epsilon clamped to `EPSILON_FLOOR=0.05` to prevent over-exploitation.
 - **Buffer persistence**: PER buffer saved/loaded across nightly training runs via `save_buffer()`/`load_buffer()`. Preserves priorities and sampling state.
 - **Weekly pooled update**: `--pooled-update` flag retrains category-level pooled models from cross-SKU session data, keeping cold-start models fresh.
+- **Early stopping**: `--early-stop-patience N` stops training after N episodes without greedy reward improvement. Saves `best_greedy_{suffix}.pt` on each improvement, reloads best checkpoint at end. History includes `early_stopped` and `early_stop_episode`.
+- **Baseline caching**: Deterministic baseline evaluations cached to `baseline_cache.json` per product (keyed by seed, step_hours, eval_episodes, demand/inventory mults). Skips 7 baseline evals on re-runs.
+- **Configurable TL epsilon**: `--tl-epsilon-start` and `--tl-epsilon-decay` override hardcoded TL exploration schedule. Defaults resolve based on mode (pooled-TL: 0.15/0.997, standard: 0.3/agent default).
+- **Adaptive replay ratio**: `--replay-ratio` defaults to 2 for pooled-TL mode, 1 otherwise. **Caution**: 2x replay ratio combined with aggressive epsilon schedule regressed performance in v3.1 (87% vs v3.0's 94%).
 
 ## Important Constraints
 
@@ -116,16 +136,20 @@ deployment/
 
 - **DEPLOYMENT.md** — Production deployment guide: data requirements, state vector construction, historical prefill pipeline, online RL architecture, rollout phases, safety guardrails, monitoring, and maintenance.
 - **ARCHITECTURE.md** — Technical architecture deep-dive: MDP formulation, algorithms, data structures, training pipeline.
-- **EXPERIMENTS.md** — Full experiment log (17 iterations from v1.0 to v2.1).
+- **EXPERIMENTS.md** — Full experiment log (21 iterations from v1.0 through v3.1, production hardening, and time-to-value visualization).
 
 ## Results Directory Structure
 
 ```
 results/portfolio_v21_pooled_tl/       — Best results (v2.1, 95%)
   portfolio_results.json               — All 150 SKU results
-  portfolio_*.png                      — 10 portfolio-level plots (incl. training progress)
+  portfolio_*.png                      — 11 portfolio-level plots (incl. training progress, time-to-value)
   {product_name}/eval_summary.json     — Per-product evaluation
 
+results/portfolio_v30_pooled_tl/       — v3.0 results (94%, 3000ep, tau schedule)
+
+results/portfolio_v31_sample_eff/      — v3.1 results (87%, sample efficiency experiment — regression)
+
 results/portfolio_v2_pooled/           — Pooled category models (v2, 78%)
-  _pooled_{category}/                  — Category model checkpoints (.pt, used by v2.1 TL)
+  _pooled_{category}/                  — Category model checkpoints (.pt, used by TL)
 ```
