@@ -47,6 +47,19 @@ TAU_END = 0.005
 TAU_WARMUP_STEPS = 0
 HOLD_ACTION_PROB = 0.5
 
+# ── Model metrics / safety ────────────────────────────────────────────────
+
+METRICS_WINDOW = 100  # last N training steps for metric averaging
+EPSILON_FLOOR = 0.05  # minimum epsilon in production
+EPSILON_DEGRADATION_RESET = 0.15  # epsilon after safety rollback
+ROLLBACK_Q_DROP_THRESHOLD = 0.3  # 30% drop in avg_q triggers rollback
+ROLLBACK_LOSS_SPIKE_THRESHOLD = 3.0  # 3x loss increase triggers rollback
+
+# ── Weekly pooled model update ────────────────────────────────────────────
+
+POOLED_UPDATE_LOOKBACK_DAYS = 30
+POOLED_EPISODES_PER_SKU = 100
+
 # ── Reward constants (must match env.step()) ──────────────────────────────
 
 WASTE_PENALTY_MULTIPLIER = 3.0
@@ -135,6 +148,24 @@ class ProductionConfig:
         cat_dir = os.path.join(self.pooled_models_dir, category)
         os.makedirs(cat_dir, exist_ok=True)
         return os.path.join(cat_dir, f"pooled_{category}_{variant}_2h.pt")
+
+    def metrics_path(self, sku_name: str) -> str:
+        """Return path: models/{sku_name}/metrics.json"""
+        return os.path.join(self.model_dir_for_sku(sku_name), "metrics.json")
+
+    def prev_metrics_path(self, sku_name: str) -> str:
+        """Return path: models/{sku_name}/metrics_prev.json"""
+        return os.path.join(self.model_dir_for_sku(sku_name), "metrics_prev.json")
+
+    def buffer_path(self, sku_name: str) -> str:
+        """Return path: models/{sku_name}/buffer.pt"""
+        return os.path.join(self.model_dir_for_sku(sku_name), "buffer.pt")
+
+    def pooled_prev_model_path(self, category: str, variant: str = "plain") -> str:
+        """Return path: models/_pooled/{category}/pooled_{cat}_{variant}_2h_prev.pt"""
+        cat_dir = os.path.join(self.pooled_models_dir, category)
+        os.makedirs(cat_dir, exist_ok=True)
+        return os.path.join(cat_dir, f"pooled_{category}_{variant}_2h_prev.pt")
 
     def batch_log_path(self, date_str: str) -> str:
         """Return path: logs/batch_train_{date}.log"""

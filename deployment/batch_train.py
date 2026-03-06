@@ -8,6 +8,7 @@ Usage:
     python -m deployment.batch_train --date 2026-03-01 --workers 16
     python -m deployment.batch_train --date 2026-03-01 --sku salmon_fillet
     python -m deployment.batch_train --date 2026-03-01 --lookback-days 14
+    python -m deployment.batch_train --date 2026-03-01 --pooled-update
 """
 
 import argparse
@@ -17,6 +18,7 @@ import logging
 import os
 import shutil
 import sys
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta
 
@@ -27,19 +29,26 @@ from deployment.config import (
     BUFFER_SIZE,
     ELEVATED_PER_PRIORITY,
     EPSILON_DECAY,
+    EPSILON_DEGRADATION_RESET,
     EPSILON_END,
+    EPSILON_FLOOR,
     EPSILON_START,
     GAMMA,
     HIDDEN_DIM,
     HOLD_ACTION_PROB,
     LOOKBACK_DAYS,
     LR,
+    METRICS_WINDOW,
     N_ACTIONS,
     N_STEP,
     PER_ALPHA,
     PER_BETA_END,
     PER_BETA_START,
     PER_EPSILON,
+    POOLED_EPISODES_PER_SKU,
+    POOLED_UPDATE_LOOKBACK_DAYS,
+    ROLLBACK_LOSS_SPIKE_THRESHOLD,
+    ROLLBACK_Q_DROP_THRESHOLD,
     STATE_DIM,
     TAU_END,
     TAU_START,
@@ -83,6 +92,37 @@ def _compute_product_features(product: dict) -> np.ndarray:
     return np.array([price_norm, cost_frac_norm, inventory_norm, pack_size_norm], dtype=np.float32)
 
 
+def should_rollback(metrics_path: str, prev_metrics_path: str) -> tuple:
+    """Check if model metrics degraded enough to warrant rollback.
+
+    Returns
+    -------
+    (should_roll: bool, reason: str)
+    """
+    if not os.path.exists(metrics_path) or not os.path.exists(prev_metrics_path):
+        return False, ""
+
+    with open(prev_metrics_path, "r") as f:
+        prev = json.load(f)
+    with open(metrics_path, "r") as f:
+        curr = json.load(f)
+
+    old_q = prev.get("avg_q_value")
+    new_q = curr.get("avg_q_value")
+    old_loss = prev.get("mean_loss")
+    new_loss = curr.get("mean_loss")
+
+    if old_q is not None and new_q is not None and old_q > 0:
+        if new_q < old_q * (1 - ROLLBACK_Q_DROP_THRESHOLD):
+            return True, f"avg_q dropped {old_q:.4f} -> {new_q:.4f} ({ROLLBACK_Q_DROP_THRESHOLD*100:.0f}% threshold)"
+
+    if old_loss is not None and new_loss is not None and old_loss > 0:
+        if new_loss > old_loss * ROLLBACK_LOSS_SPIKE_THRESHOLD:
+            return True, f"mean_loss spiked {old_loss:.4f} -> {new_loss:.4f} ({ROLLBACK_LOSS_SPIKE_THRESHOLD}x threshold)"
+
+    return False, ""
+
+
 def train_single_sku(
     sku_name: str,
     config: ProductionConfig,
@@ -112,7 +152,8 @@ def train_single_sku(
     -------
     dict
         Training summary with keys: sku_name, n_sessions, n_transitions,
-        training_steps, final_loss, model_source, checkpoint_path.
+        training_steps, final_loss, model_source, checkpoint_path,
+        avg_q_value, mean_loss, epsilon, rolled_back, rollback_reason.
     """
     from fresh_rl.dqn_agent import DQNAgent
 
@@ -130,37 +171,38 @@ def train_single_sku(
     etl = SessionETL(config)
     csv_paths = etl.load_sessions_for_date_range(start_date, end_date, sku_name)
 
+    empty_result = {
+        "sku_name": sku_name,
+        "n_sessions": 0,
+        "n_transitions": 0,
+        "training_steps": 0,
+        "final_loss": None,
+        "model_source": "none",
+        "checkpoint_path": None,
+        "avg_q_value": None,
+        "mean_loss": None,
+        "epsilon": None,
+        "rolled_back": False,
+        "rollback_reason": "",
+    }
+
     if not csv_paths:
         logger.info("No sessions found for %s in [%s, %s]", sku_name, start_date, end_date)
-        return {
-            "sku_name": sku_name,
-            "n_sessions": 0,
-            "n_transitions": 0,
-            "training_steps": 0,
-            "final_loss": None,
-            "model_source": "none",
-            "checkpoint_path": None,
-        }
+        return empty_result
 
-    # ETL: sessions → transitions
+    # ETL: sessions -> transitions
     transitions = etl.etl_sessions(csv_paths, base_price, cost_per_unit, product_features)
     n_sessions = len(csv_paths)
     n_transitions = len(transitions)
 
     if n_transitions == 0:
         logger.info("No valid transitions for %s", sku_name)
-        return {
-            "sku_name": sku_name,
-            "n_sessions": n_sessions,
-            "n_transitions": 0,
-            "training_steps": 0,
-            "final_loss": None,
-            "model_source": "none",
-            "checkpoint_path": None,
-        }
+        empty_result["n_sessions"] = n_sessions
+        return empty_result
 
     # Load or create agent
     checkpoint_path = config.checkpoint_path(sku_name)
+    buffer_path = config.buffer_path(sku_name)
     model_source = "fresh"
 
     agent = DQNAgent(
@@ -208,6 +250,14 @@ def train_single_sku(
             except Exception as e:
                 logger.warning("Failed to load pooled model for %s: %s", sku_name, e)
 
+    # Load persisted replay buffer if available
+    if os.path.exists(buffer_path):
+        try:
+            agent.load_buffer(buffer_path)
+            logger.info("Loaded buffer for %s: %d transitions", sku_name, len(agent.replay_buffer))
+        except Exception as e:
+            logger.warning("Failed to load buffer for %s: %s", sku_name, e)
+
     # Feed transitions into replay buffer with elevated PER priority
     has_per = hasattr(agent.replay_buffer, "max_priority")
     if has_per:
@@ -223,25 +273,98 @@ def train_single_sku(
     # Training: gradient steps proportional to data volume
     total_steps = training_steps_per_session * n_sessions
     final_loss = None
+    recent_losses = []
 
     for step in range(total_steps):
         loss = agent.train_step_fn()
         if loss is not None:
             final_loss = loss
+            recent_losses.append(loss)
+            if len(recent_losses) > METRICS_WINDOW:
+                recent_losses.pop(0)
 
-    # Decay epsilon once per batch run
+    # Decay epsilon once per batch run, clamp to floor
     agent.decay_epsilon()
+    agent.epsilon = max(agent.epsilon, EPSILON_FLOOR)
 
-    # Rotate checkpoint: current → prev
+    # Compute metrics
+    mean_loss = float(np.mean(recent_losses)) if recent_losses else None
+
+    # Compute avg Q-value from a sample of states in the buffer
+    avg_q_value = None
+    if len(agent.replay_buffer) >= agent.batch_size:
+        sample = agent.replay_buffer.sample(min(METRICS_WINDOW, len(agent.replay_buffer)))
+        if sample is not None:
+            sample_states = sample[0]  # states are first element in both PER and plain
+            avg_q_value = agent.compute_avg_q(sample_states)
+
+    # Rotate checkpoint: current -> prev
     prev_path = config.prev_checkpoint_path(sku_name)
     if os.path.exists(checkpoint_path):
         shutil.copy2(checkpoint_path, prev_path)
 
     agent.save(checkpoint_path)
+
+    # Save replay buffer
+    try:
+        agent.save_buffer(buffer_path)
+    except Exception as e:
+        logger.warning("Failed to save buffer for %s: %s", sku_name, e)
+
+    # Write metrics (rotate existing -> prev first)
+    metrics_path = config.metrics_path(sku_name)
+    prev_metrics_path = config.prev_metrics_path(sku_name)
+    if os.path.exists(metrics_path):
+        shutil.copy2(metrics_path, prev_metrics_path)
+
+    metrics = {
+        "avg_q_value": avg_q_value,
+        "mean_loss": mean_loss,
+        "n_transitions": n_transitions,
+        "epsilon": agent.epsilon,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    # Safety rollback check
+    rolled_back = False
+    rollback_reason = ""
+    do_rollback, reason = should_rollback(metrics_path, prev_metrics_path)
+    if do_rollback:
+        rolled_back = True
+        rollback_reason = reason
+        logger.warning("ROLLBACK %s: %s", sku_name, reason)
+
+        # Restore previous checkpoint
+        if os.path.exists(prev_path):
+            shutil.copy2(prev_path, checkpoint_path)
+
+        # Restore previous metrics
+        if os.path.exists(prev_metrics_path):
+            shutil.copy2(prev_metrics_path, metrics_path)
+
+        # Reset epsilon to exploration mode and re-save
+        agent.load(checkpoint_path)
+        agent.epsilon = EPSILON_DEGRADATION_RESET
+        agent.save(checkpoint_path)
+
+        # Update metrics file with reset epsilon
+        with open(metrics_path, "r") as f:
+            restored_metrics = json.load(f)
+        restored_metrics["epsilon"] = agent.epsilon
+        restored_metrics["rolled_back"] = True
+        with open(metrics_path, "w") as f:
+            json.dump(restored_metrics, f, indent=2)
+
     logger.info(
-        "Trained %s: %d sessions, %d transitions, %d steps, loss=%.4f",
+        "Trained %s: %d sessions, %d transitions, %d steps, loss=%.4f, "
+        "avg_q=%.4f, eps=%.4f%s",
         sku_name, n_sessions, n_transitions, total_steps,
         final_loss if final_loss is not None else 0.0,
+        avg_q_value if avg_q_value is not None else 0.0,
+        agent.epsilon,
+        f" [ROLLED BACK: {rollback_reason}]" if rolled_back else "",
     )
 
     return {
@@ -252,6 +375,11 @@ def train_single_sku(
         "final_loss": final_loss,
         "model_source": model_source,
         "checkpoint_path": checkpoint_path,
+        "avg_q_value": avg_q_value,
+        "mean_loss": mean_loss,
+        "epsilon": agent.epsilon,
+        "rolled_back": rolled_back,
+        "rollback_reason": rollback_reason,
     }
 
 
@@ -260,6 +388,137 @@ def _train_worker(args):
     sku_name, config_base_dir, product, end_date, lookback_days, steps_per_session = args
     config = ProductionConfig(base_dir=config_base_dir)
     return train_single_sku(sku_name, config, product, end_date, lookback_days, steps_per_session)
+
+
+def train_pooled_category(
+    category: str,
+    config: ProductionConfig,
+    products: dict,
+    end_date: str,
+    lookback_days: int = POOLED_UPDATE_LOOKBACK_DAYS,
+) -> dict:
+    """Retrain a pooled category model from cross-SKU session data.
+
+    Parameters
+    ----------
+    category : str
+        Category name (e.g. "meats").
+    config : ProductionConfig
+        Paths.
+    products : dict
+        {sku_name: product_dict} for all SKUs in this category.
+    end_date : str
+        Last date to include.
+    lookback_days : int
+        Days of history to include.
+
+    Returns
+    -------
+    dict
+        Summary with category, n_skus, n_transitions, training_steps, model_path.
+    """
+    from fresh_rl.dqn_agent import DQNAgent
+
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    start = end - timedelta(days=lookback_days)
+    start_date = start.isoformat()
+
+    etl = SessionETL(config)
+
+    # Collect transitions from all SKUs in this category
+    all_transitions = []
+    skus_with_data = 0
+
+    for sku_name, product in sorted(products.items()):
+        base_price = float(product["base_price"])
+        cost_per_unit = float(product["cost_per_unit"])
+        product_features = _compute_product_features(product)
+
+        csv_paths = etl.load_sessions_for_date_range(start_date, end_date, sku_name)
+        if not csv_paths:
+            continue
+
+        transitions = etl.etl_sessions(csv_paths, base_price, cost_per_unit, product_features)
+        if transitions:
+            all_transitions.extend(transitions)
+            skus_with_data += 1
+
+    if not all_transitions:
+        logger.info("No transitions for pooled category %s", category)
+        return {
+            "category": category,
+            "n_skus": 0,
+            "n_transitions": 0,
+            "training_steps": 0,
+            "model_path": None,
+        }
+
+    # Create pooled agent
+    agent = DQNAgent(
+        state_dim=STATE_DIM,
+        n_actions=N_ACTIONS,
+        hidden_dim=HIDDEN_DIM,
+        lr=LR,
+        gamma=GAMMA,
+        epsilon_start=EPSILON_START,
+        epsilon_end=EPSILON_END,
+        epsilon_decay=EPSILON_DECAY,
+        buffer_size=BUFFER_SIZE,
+        batch_size=BATCH_SIZE,
+        reward_shaping=False,
+        use_per=USE_PER,
+        per_alpha=PER_ALPHA,
+        per_beta_start=PER_BETA_START,
+        per_beta_end=PER_BETA_END,
+        per_epsilon=PER_EPSILON,
+        n_step=N_STEP,
+        hold_action_prob=HOLD_ACTION_PROB,
+        tau_start=TAU_START,
+        tau_end=TAU_END,
+        tau_warmup_steps=TAU_WARMUP_STEPS,
+    )
+
+    # Load existing pooled model if available
+    pooled_path = config.pooled_model_path(category, "plain")
+    if os.path.exists(pooled_path):
+        try:
+            agent.load(pooled_path)
+            logger.info("Loaded existing pooled model for %s", category)
+        except Exception as e:
+            logger.warning("Failed to load pooled model for %s: %s, starting fresh", category, e)
+
+    # Feed all transitions
+    for s, a, r, s_next, done, next_mask in all_transitions:
+        agent.store_transition(s, a, r, s_next, done, next_mask)
+
+    # Train
+    total_steps = POOLED_EPISODES_PER_SKU * skus_with_data
+    final_loss = None
+
+    for step in range(total_steps):
+        loss = agent.train_step_fn()
+        if loss is not None:
+            final_loss = loss
+
+    # Rotate: current -> prev
+    prev_path = config.pooled_prev_model_path(category, "plain")
+    if os.path.exists(pooled_path):
+        shutil.copy2(pooled_path, prev_path)
+
+    agent.save(pooled_path)
+    logger.info(
+        "Pooled model %s: %d SKUs, %d transitions, %d steps, loss=%.4f",
+        category, skus_with_data, len(all_transitions), total_steps,
+        final_loss if final_loss is not None else 0.0,
+    )
+
+    return {
+        "category": category,
+        "n_skus": skus_with_data,
+        "n_transitions": len(all_transitions),
+        "training_steps": total_steps,
+        "model_path": pooled_path,
+    }
 
 
 def load_product_master(path: str) -> dict:
@@ -309,6 +568,17 @@ def main():
         default="deployment",
         help="Base directory for data/models/logs (default: deployment)",
     )
+    parser.add_argument(
+        "--pooled-update",
+        action="store_true",
+        help="After per-SKU training, retrain pooled category models",
+    )
+    parser.add_argument(
+        "--pooled-lookback-days",
+        type=int,
+        default=POOLED_UPDATE_LOOKBACK_DAYS,
+        help=f"Lookback days for pooled model update (default: {POOLED_UPDATE_LOOKBACK_DAYS})",
+    )
     args = parser.parse_args()
 
     config = ProductionConfig(base_dir=args.base_dir)
@@ -345,7 +615,7 @@ def main():
     else:
         sku_list = sorted(products.keys())
 
-    # Train
+    # Train per-SKU
     results = []
     if args.workers <= 1:
         # Sequential
@@ -365,9 +635,26 @@ def main():
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             results = list(executor.map(_train_worker, work_items))
 
+    # Weekly pooled model update
+    pooled_results = []
+    if args.pooled_update:
+        logger.info("Starting pooled model update (lookback=%d days)", args.pooled_lookback_days)
+
+        # Group products by category
+        category_products = defaultdict(dict)
+        for sku_name, product in products.items():
+            category_products[product["category"]][sku_name] = product
+
+        for category, cat_products in sorted(category_products.items()):
+            pooled_result = train_pooled_category(
+                category, config, cat_products, args.date, args.pooled_lookback_days,
+            )
+            pooled_results.append(pooled_result)
+
     # Write report
     trained = [r for r in results if r["n_transitions"] > 0]
     skipped = [r for r in results if r["n_transitions"] == 0]
+    rolled_back = [r for r in results if r.get("rolled_back")]
 
     report = {
         "date": args.date,
@@ -375,19 +662,23 @@ def main():
         "total_skus": len(sku_list),
         "trained": len(trained),
         "skipped": len(skipped),
+        "rolled_back": len(rolled_back),
         "total_sessions": sum(r["n_sessions"] for r in results),
         "total_transitions": sum(r["n_transitions"] for r in results),
         "total_training_steps": sum(r["training_steps"] for r in results),
         "results": results,
     }
 
+    if pooled_results:
+        report["pooled_results"] = pooled_results
+
     report_path = config.batch_report_path(args.date)
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
     logger.info(
-        "Batch training complete: %d/%d trained, %d skipped, report: %s",
-        len(trained), len(sku_list), len(skipped), report_path,
+        "Batch training complete: %d/%d trained, %d skipped, %d rolled back, report: %s",
+        len(trained), len(sku_list), len(skipped), len(rolled_back), report_path,
     )
 
 

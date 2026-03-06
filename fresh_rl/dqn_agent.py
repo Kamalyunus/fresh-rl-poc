@@ -86,6 +86,24 @@ class ReplayBuffer:
         next_action_masks = np.array([b[5] for b in batch], dtype=bool)
         return states, actions, rewards, next_states, dones, next_action_masks
 
+    def save(self, path):
+        """Save buffer contents to disk."""
+        data = {
+            "transitions": [
+                (s.tolist(), a, r, s2.tolist(), d, m.tolist())
+                for s, a, r, s2, d, m in self.buffer
+            ],
+        }
+        torch.save(data, path)
+
+    def load(self, path):
+        """Load buffer contents from disk."""
+        data = torch.load(path, weights_only=False)
+        for s, a, r, s2, d, m in data["transitions"]:
+            self.push(np.array(s, dtype=np.float32), a, r,
+                      np.array(s2, dtype=np.float32), d,
+                      np.array(m, dtype=bool))
+
     def __len__(self):
         return len(self.buffer)
 
@@ -385,3 +403,17 @@ class DQNAgent:
         data = torch.load(path, map_location=self.device, weights_only=False)
         self.q_network.load_state_dict(data["q_network"])
         self.target_network.load_state_dict(data["q_network"])  # sync target to q_network
+
+    def compute_avg_q(self, states):
+        """Mean max Q-value over a batch of states (proxy for model confidence)."""
+        with torch.no_grad():
+            q = self.q_network(torch.FloatTensor(np.array(states)))
+            return q.max(dim=1).values.mean().item()
+
+    def save_buffer(self, path):
+        """Save replay buffer to disk (supports both PER and plain)."""
+        self.replay_buffer.save(path)
+
+    def load_buffer(self, path):
+        """Load replay buffer from disk (supports both PER and plain)."""
+        self.replay_buffer.load(path)

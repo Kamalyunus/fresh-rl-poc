@@ -9,6 +9,7 @@ References:
 """
 
 import numpy as np
+import torch
 from fresh_rl.sumtree import SumTree
 
 
@@ -156,6 +157,49 @@ class PrioritizedReplayBuffer:
             priority = (abs(td_err) + self.epsilon_per) ** self.alpha
             self.tree.update(int(idx), priority)
             self.max_priority = max(self.max_priority, abs(td_err) + self.epsilon_per)
+
+    def _get_all_transitions(self):
+        """Return list of all stored transitions."""
+        return [self.tree.data[i] for i in range(self.tree.size)]
+
+    def _get_all_priorities(self):
+        """Return list of leaf priorities for all stored transitions."""
+        return [
+            self.tree.tree[i + self.tree.capacity - 1]
+            for i in range(self.tree.size)
+        ]
+
+    def save(self, path):
+        """Save buffer contents and priorities to disk."""
+        transitions = self._get_all_transitions()
+        data = {
+            "transitions": [
+                (s.tolist(), int(a), float(r), s2.tolist(), float(d), m.tolist())
+                for s, a, r, s2, d, m in transitions
+            ],
+            "priorities": self._get_all_priorities(),
+            "max_priority": self.max_priority,
+            "sample_step": self._sample_step,
+        }
+        torch.save(data, path)
+
+    def load(self, path):
+        """Load buffer contents and priorities from disk."""
+        data = torch.load(path, weights_only=False)
+        for (s, a, r, s2, d, m), priority in zip(
+            data["transitions"], data["priorities"]
+        ):
+            self.push(
+                np.array(s, dtype=np.float32), a, r,
+                np.array(s2, dtype=np.float32), d,
+                np.array(m, dtype=bool),
+            )
+            # Fix priority (push uses max_priority, we want the saved priority)
+            idx = (self.tree.write_idx - 1) % self.tree.capacity
+            tree_idx = idx + self.tree.capacity - 1
+            self.tree.update(tree_idx, priority)
+        self.max_priority = data.get("max_priority", 1.0)
+        self._sample_step = data.get("sample_step", 0)
 
     def __len__(self):
         return self.tree.size
