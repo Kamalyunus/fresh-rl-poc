@@ -1400,175 +1400,177 @@ def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
     print(f"  Saved: {path}")
 
 
+def _load_daily_rewards(portfolio_dir, results):
+    """Load per-episode training rewards from training history files.
+
+    Returns dict with keys 'plain' and 'shaped', each mapping product name to
+    a list of daily rewards (one per episode/day).
+    """
+    daily = {"plain": {}, "shaped": {}}
+    for r in results:
+        product = r["product"]
+        product_dir = os.path.join(portfolio_dir, product)
+        if not os.path.isdir(product_dir):
+            continue
+        for fname in os.listdir(product_dir):
+            if not fname.startswith(f"training_history_{product}_"):
+                continue
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(product_dir, fname)
+            try:
+                with open(fpath) as f:
+                    hist = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            rewards = hist.get("episode_rewards", [])
+            if not rewards:
+                continue
+            variant = "shaped" if "_shaped" in fname else "plain"
+            daily[variant][product] = rewards
+    return daily
+
+
 def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     """2x2 stakeholder-ready chart showing how quickly RL delivers value.
 
-    Panels: cumulative % beating baseline, day-1 by category, days-to-beat
-    histogram, reward gap over episodes. 1 episode = 1 day in production.
+    Uses actual daily training rewards (1 session per day, with exploration)
+    to show realistic production performance over time.
     """
-    histories = _load_training_histories(portfolio_dir, ok_results)
-    if not histories["plain"] and not histories["shaped"]:
+    daily = _load_daily_rewards(portfolio_dir, ok_results)
+    if not daily["plain"] and not daily["shaped"]:
         print("  [SKIP] No training histories found for time-to-value plot.")
         return
 
     baseline_by_product = {r["product"]: r["best_baseline_reward"] for r in ok_results}
     category_by_product = {r["product"]: r["category"] for r in ok_results}
 
-    # Collect all episode numbers
-    all_episodes = set()
-    for variant in ("plain", "shaped"):
-        for evals in histories[variant].values():
-            for e in evals:
-                all_episodes.add(e["episode"])
-    episodes = sorted(all_episodes)
-
-    # Build per-product last-eval lookup for carry-forward
-    product_last_any = {}
-    for variant in ("plain", "shaped"):
-        for product, evals in histories[variant].items():
-            if evals:
-                last = max(evals, key=lambda e: e["episode"])
-                product_last_any.setdefault(product, {})[variant] = last
-
-    # Per-product, per-episode: best_reward = max(plain, shaped) with carry-forward
+    # Find products with data and max episode count
     products_with_data = set()
     for variant in ("plain", "shaped"):
-        products_with_data.update(histories[variant].keys())
+        products_with_data.update(daily[variant].keys())
+    max_days = max(
+        max((len(daily[v].get(p, [])) for p in products_with_data), default=0)
+        for v in ("plain", "shaped")
+    )
+    if max_days == 0:
+        print("  [SKIP] No daily reward data found for time-to-value plot.")
+        return
+    days = np.arange(max_days)
 
-    # best_reward_at[product][ep] = best reward at that episode (raw)
-    best_reward_at = {}
+    # Per-product, per-day: best daily reward = max(plain, shaped)
+    # Each day is one real session with exploration noise
+    best_daily = {}  # product -> array of daily rewards
     for product in products_with_data:
-        best_reward_at[product] = {}
-        for ep in episodes:
-            best = -float("inf")
-            for variant in ("plain", "shaped"):
-                evals = histories.get(variant, {}).get(product, [])
-                matched = None
-                for e in evals:
-                    if e["episode"] == ep:
-                        matched = e
-                        break
-                if matched is None:
-                    last = product_last_any.get(product, {}).get(variant)
-                    if last and ep > last["episode"]:
-                        matched = last
-                if matched is not None:
-                    best = max(best, matched["reward"])
-            if best > -float("inf"):
-                best_reward_at[product][ep] = best
+        plain_r = daily["plain"].get(product, [])
+        shaped_r = daily["shaped"].get(product, [])
+        n = max(len(plain_r), len(shaped_r))
+        best = np.full(n, np.nan)
+        for i in range(n):
+            vals = []
+            if i < len(plain_r):
+                vals.append(plain_r[i])
+            if i < len(shaped_r):
+                vals.append(shaped_r[i])
+            if vals:
+                best[i] = max(vals)
+        best_daily[product] = best
 
-    # Smooth per-product rewards with rolling average to reduce single-eval noise
-    smooth_window = 10
-    smoothed_reward_at = {}
-    for product in products_with_data:
-        smoothed_reward_at[product] = {}
-        raw_vals = []
-        for ep in episodes:
-            r = best_reward_at[product].get(ep)
-            if r is not None:
-                raw_vals.append(r)
-            if raw_vals:
-                window = raw_vals[-smooth_window:]
-                smoothed_reward_at[product][ep] = np.mean(window)
+    # Per-day: raw % of products beating baseline + reward gaps
+    smooth_window = 30  # 30-day rolling average for trend
+    raw_pct = np.full(max_days, np.nan)
+    smooth_pct = np.full(max_days, np.nan)
+    gap_mean = np.full(max_days, np.nan)
+    gap_p25 = np.full(max_days, np.nan)
+    gap_p75 = np.full(max_days, np.nan)
 
-    # Compute first_beat_episode per product (using smoothed rewards)
+    pct_history = []
+    for day in range(max_days):
+        beats, n = 0, 0
+        gaps = []
+        for product in products_with_data:
+            bl = baseline_by_product.get(product)
+            if bl is None:
+                continue
+            arr = best_daily[product]
+            if day >= len(arr) or np.isnan(arr[day]):
+                continue
+            n += 1
+            if arr[day] > bl:
+                beats += 1
+            gaps.append(arr[day] - bl)
+        if n > 0:
+            raw_pct[day] = beats / n * 100
+            pct_history.append(raw_pct[day])
+            window = pct_history[-smooth_window:]
+            smooth_pct[day] = np.mean(window)
+        if gaps:
+            gap_mean[day] = np.mean(gaps)
+            gap_p25[day] = np.percentile(gaps, 25)
+            gap_p75[day] = np.percentile(gaps, 75)
+
+    # First day each product's 30-day rolling avg beats baseline
     first_beat = {}
     for product in products_with_data:
         bl = baseline_by_product.get(product)
         if bl is None:
             continue
-        for ep in episodes:
-            r = smoothed_reward_at[product].get(ep)
-            if r is not None and r > bl:
-                first_beat[product] = ep
+        arr = best_daily[product]
+        rolling = []
+        for day in range(len(arr)):
+            if not np.isnan(arr[day]):
+                rolling.append(arr[day])
+            window = rolling[-smooth_window:]
+            if window and np.mean(window) > bl:
+                first_beat[product] = day
                 break
 
-    # Per-episode: cumulative % beating baseline + reward gap stats (smoothed)
-    cum_pct = []
-    gap_mean, gap_p25, gap_p75 = [], [], []
-    for ep in episodes:
-        beats, gaps = 0, []
-        n = 0
-        for product in products_with_data:
-            bl = baseline_by_product.get(product)
-            if bl is None:
-                continue
-            r = smoothed_reward_at[product].get(ep)
-            if r is None:
-                continue
-            n += 1
-            if r > bl:
-                beats += 1
-            gaps.append(r - bl)
-        cum_pct.append(beats / n * 100 if n > 0 else np.nan)
-        if gaps:
-            gap_mean.append(np.mean(gaps))
-            gap_p25.append(np.percentile(gaps, 25))
-            gap_p75.append(np.percentile(gaps, 75))
-        else:
-            gap_mean.append(np.nan)
-            gap_p25.append(np.nan)
-            gap_p75.append(np.nan)
-
-    ep_arr = np.array(episodes)
-    cum_pct = np.array(cum_pct)
-    gap_mean = np.array(gap_mean)
-    gap_p25 = np.array(gap_p25)
-    gap_p75 = np.array(gap_p75)
-
-    # Limit to first 500 episodes for focus
-    mask_500 = ep_arr <= 500
-    ep_500 = ep_arr[mask_500]
-    cum_500 = cum_pct[mask_500]
-    gap_mean_500 = gap_mean[mask_500]
-    gap_p25_500 = gap_p25[mask_500]
-    gap_p75_500 = gap_p75[mask_500]
+    # Limit to first 500 days for focus
+    max_plot = min(max_days, 500)
+    plot_days = days[:max_plot]
 
     # --- Plot ---
     categories = sorted(set(r["category"] for r in ok_results))
     cat_colors = _get_category_colors(categories)
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Time to Value — RL Model Convergence After Deployment",
+    fig.suptitle("Time to Value — Actual Daily Performance After Deployment",
                  fontsize=14, fontweight="bold")
 
     # Panel 1: % beating baseline over time (hero chart)
     ax = axes[0, 0]
-    ax.plot(ep_500, cum_500, color="#27AE60", linewidth=2.5, zorder=3)
-    ax.fill_between(ep_500, cum_500, alpha=0.15, color="#27AE60")
-    # Annotate day 1
-    if len(cum_500) > 0:
-        day1_val = cum_500[0]
-        ax.annotate(f"Day 1: {day1_val:.0f}%", xy=(ep_500[0], day1_val),
-                    xytext=(ep_500[0] + 40, day1_val - 8),
+    ax.plot(plot_days, raw_pct[:max_plot], color="#27AE60", alpha=0.25,
+            linewidth=0.8, label="Daily (raw)")
+    ax.plot(plot_days, smooth_pct[:max_plot], color="#27AE60", linewidth=2.5,
+            zorder=3, label=f"{smooth_window}-day avg")
+    ax.fill_between(plot_days, smooth_pct[:max_plot], alpha=0.12, color="#27AE60")
+    # Annotate key milestones on the smooth line
+    valid_smooth = ~np.isnan(smooth_pct[:max_plot])
+    if np.any(valid_smooth):
+        # Day 1
+        first_valid = np.argmax(valid_smooth)
+        day1_val = smooth_pct[first_valid]
+        ax.annotate(f"Day 1: {day1_val:.0f}%", xy=(first_valid, day1_val),
+                    xytext=(first_valid + 30, day1_val - 10),
                     fontsize=9, fontweight="bold", color="#27AE60",
                     arrowprops=dict(arrowstyle="->", color="#27AE60", lw=1.2))
-    # Annotate day 50
-    idx_50 = np.searchsorted(ep_500, 50)
-    if idx_50 < len(cum_500):
-        day50_val = cum_500[idx_50]
-        ax.annotate(f"Day 50: {day50_val:.0f}%", xy=(ep_500[idx_50], day50_val),
-                    xytext=(ep_500[idx_50] + 40, day50_val - 8),
+        # Last day
+        last_valid = max_plot - 1 - np.argmax(valid_smooth[:max_plot][::-1])
+        final_val = smooth_pct[last_valid]
+        ax.annotate(f"Day {last_valid + 1}: {final_val:.0f}%",
+                    xy=(last_valid, final_val),
+                    xytext=(last_valid - 80, final_val - 10),
                     fontsize=9, fontweight="bold", color="#27AE60",
                     arrowprops=dict(arrowstyle="->", color="#27AE60", lw=1.2))
-    # Annotate final day
-    if len(cum_500) > 1:
-        final_ep = ep_500[-1]
-        final_val = cum_500[-1]
-        ax.annotate(f"Day {final_ep:.0f}: {final_val:.0f}%",
-                    xy=(final_ep, final_val),
-                    xytext=(final_ep - 100, final_val - 10),
-                    fontsize=9, fontweight="bold", color="#27AE60",
-                    arrowprops=dict(arrowstyle="->", color="#27AE60", lw=1.2))
-    ax.set_xlabel("Episode (= Day in Production)")
+    ax.set_xlabel("Day in Production")
     ax.set_ylabel("% of Products Beating Baseline")
-    ax.set_title("% Beating Baseline Over Time")
+    ax.set_title("% Beating Baseline Over Time (1 session/day)")
     ax.set_ylim(0, 105)
+    ax.legend(fontsize=9, loc="lower right")
     ax.grid(True, alpha=0.3)
 
-    # Panel 2: Day-1 performance by category
+    # Panel 2: Day-1 performance by category (raw, single session)
     ax = axes[0, 1]
-    ep0 = episodes[0] if episodes else 0
     cat_day1 = {}
     for cat in categories:
         cat_products = [r["product"] for r in ok_results
@@ -1578,9 +1580,9 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
             continue
         beats = 0
         for p in cat_products:
-            r = best_reward_at[p].get(ep0)
             bl = baseline_by_product.get(p)
-            if r is not None and bl is not None and r > bl:
+            arr = best_daily.get(p)
+            if arr is not None and len(arr) > 0 and bl is not None and arr[0] > bl:
                 beats += 1
         cat_day1[cat] = beats / len(cat_products) * 100
 
@@ -1597,7 +1599,7 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     ax.set_xlim(0, 110)
     ax.grid(True, axis="x", alpha=0.3)
 
-    # Panel 3: Days-to-beat-baseline histogram
+    # Panel 3: Days-to-beat-baseline histogram (using 30-day rolling avg)
     ax = axes[1, 0]
     beat_eps = list(first_beat.values())
     never_beat = len(products_with_data) - len(beat_eps)
@@ -1618,20 +1620,41 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
         ax.text(0.95, 0.95, f"{never_beat} products never beat baseline",
                 transform=ax.transAxes, ha="right", va="top", fontsize=8,
                 color="#E74C3C", fontstyle="italic")
-    ax.set_xlabel("Days to Beat Baseline (Episode)")
+    ax.set_xlabel("Days to Beat Baseline (30-day rolling avg)")
     ax.set_ylabel("Number of Products")
     ax.set_title("Distribution: Days to Beat Baseline")
     ax.grid(True, alpha=0.3)
 
-    # Panel 4: Reward gap over first 500 episodes
+    # Panel 4: Reward gap over time (smoothed with rolling mean)
     ax = axes[1, 1]
-    ax.plot(ep_500, gap_mean_500, color="#2E86C1", linewidth=2, label="Mean gap")
-    ax.fill_between(ep_500, gap_p25_500, gap_p75_500, color="#2E86C1", alpha=0.15,
-                    label="25th–75th pctl")
+    gm = gap_mean[:max_plot].copy()
+    gp25 = gap_p25[:max_plot].copy()
+    gp75 = gap_p75[:max_plot].copy()
+    # Rolling mean using cumsum trick (numpy-only)
+    def _rolling_mean(arr, w):
+        valid = ~np.isnan(arr)
+        if np.sum(valid) <= w:
+            return arr
+        out = arr.copy()
+        vals = arr[valid]
+        cs = np.cumsum(vals)
+        cs = np.insert(cs, 0, 0)
+        smoothed = np.empty_like(vals)
+        for i in range(len(vals)):
+            start = max(0, i + 1 - w)
+            smoothed[i] = (cs[i + 1] - cs[start]) / (i + 1 - start)
+        out[valid] = smoothed
+        return out
+    gm = _rolling_mean(gm, smooth_window)
+    gp25 = _rolling_mean(gp25, smooth_window)
+    gp75 = _rolling_mean(gp75, smooth_window)
+    ax.plot(plot_days, gm, color="#2E86C1", linewidth=2, label="Mean gap")
+    ax.fill_between(plot_days, gp25, gp75, color="#2E86C1", alpha=0.15,
+                    label="25th-75th pctl")
     ax.axhline(0, color="#E74C3C", linestyle="--", linewidth=1, alpha=0.7, label="Break-even")
-    ax.set_xlabel("Episode (= Day in Production)")
-    ax.set_ylabel("Reward − Baseline Reward")
-    ax.set_title("Reward Gap vs Baseline Over Training")
+    ax.set_xlabel("Day in Production")
+    ax.set_ylabel("Reward - Baseline Reward")
+    ax.set_title("Reward Gap vs Baseline Over Time")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
