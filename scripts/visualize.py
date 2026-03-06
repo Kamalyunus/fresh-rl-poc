@@ -1249,21 +1249,34 @@ def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
                 all_episodes.add(e["episode"])
     episodes = sorted(all_episodes)
 
-    # Aggregate per-episode stats for each variant
+    # Aggregate per-episode stats for each variant.
+    # For products that early-stopped, carry forward their last greedy eval
+    # to all subsequent episodes to avoid survivorship bias.
     def aggregate(variant):
+        # Build per-product lookup: episode -> eval, and track last eval
+        product_last = {}  # product -> last eval dict
+        for product, evals in histories[variant].items():
+            if evals:
+                product_last[product] = max(evals, key=lambda e: e["episode"])
+
         rewards, wastes, beats = [], [], []
         for ep in episodes:
             ep_rewards, ep_wastes, ep_beats = [], [], []
             for product, evals in histories[variant].items():
-                # Find checkpoint matching this episode
+                # Find checkpoint matching this episode, or carry forward last if past end
+                matched = None
                 for e in evals:
                     if e["episode"] == ep:
-                        ep_rewards.append(e["reward"])
-                        ep_wastes.append(e.get("waste", 0.0))
-                        bl = baseline_by_product.get(product)
-                        if bl is not None:
-                            ep_beats.append(1 if e["reward"] > bl else 0)
+                        matched = e
                         break
+                if matched is None and ep > product_last.get(product, {}).get("episode", float("inf")):
+                    matched = product_last[product]
+                if matched is not None:
+                    ep_rewards.append(matched["reward"])
+                    ep_wastes.append(matched.get("waste", 0.0))
+                    bl = baseline_by_product.get(product)
+                    if bl is not None:
+                        ep_beats.append(1 if matched["reward"] > bl else 0)
             if ep_rewards:
                 rewards.append((np.mean(ep_rewards), np.percentile(ep_rewards, 25),
                                 np.percentile(ep_rewards, 75)))
@@ -1280,8 +1293,18 @@ def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
             agg[variant] = aggregate(variant)
 
     # Per-category beats-baseline curves (best of plain/shaped per product per episode)
+    # Carry forward last eval for early-stopped products.
     categories = sorted(set(r["category"] for r in ok_results))
     cat_colors = _get_category_colors(categories)
+
+    # Build per-product last-eval lookup across variants
+    product_last_any = {}  # product -> {variant: last_eval}
+    for variant in ("plain", "shaped"):
+        for product, evals in histories.get(variant, {}).items():
+            if evals:
+                last = max(evals, key=lambda e: e["episode"])
+                product_last_any.setdefault(product, {})[variant] = last
+
     cat_beats = {cat: [] for cat in categories}
     for ep in episodes:
         cat_ep = {cat: [] for cat in categories}
@@ -1293,10 +1316,18 @@ def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
                 continue
             best_reward = -float("inf")
             for variant in ("plain", "shaped"):
-                for e in histories.get(variant, {}).get(product, []):
+                evals = histories.get(variant, {}).get(product, [])
+                matched = None
+                for e in evals:
                     if e["episode"] == ep:
-                        best_reward = max(best_reward, e["reward"])
+                        matched = e
                         break
+                if matched is None:
+                    last = product_last_any.get(product, {}).get(variant)
+                    if last and ep > last["episode"]:
+                        matched = last
+                if matched is not None:
+                    best_reward = max(best_reward, matched["reward"])
             if best_reward > -float("inf"):
                 cat_ep[cat].append(1 if best_reward > bl else 0)
         for cat in categories:
@@ -1369,6 +1400,229 @@ def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
     print(f"  Saved: {path}")
 
 
+def plot_time_to_value(ok_results, portfolio_dir, save_dir):
+    """2x2 stakeholder-ready chart showing how quickly RL delivers value.
+
+    Panels: cumulative % beating baseline, day-1 by category, days-to-beat
+    histogram, reward gap over episodes. 1 episode = 1 day in production.
+    """
+    histories = _load_training_histories(portfolio_dir, ok_results)
+    if not histories["plain"] and not histories["shaped"]:
+        print("  [SKIP] No training histories found for time-to-value plot.")
+        return
+
+    baseline_by_product = {r["product"]: r["best_baseline_reward"] for r in ok_results}
+    category_by_product = {r["product"]: r["category"] for r in ok_results}
+
+    # Collect all episode numbers
+    all_episodes = set()
+    for variant in ("plain", "shaped"):
+        for evals in histories[variant].values():
+            for e in evals:
+                all_episodes.add(e["episode"])
+    episodes = sorted(all_episodes)
+
+    # Build per-product last-eval lookup for carry-forward
+    product_last_any = {}
+    for variant in ("plain", "shaped"):
+        for product, evals in histories[variant].items():
+            if evals:
+                last = max(evals, key=lambda e: e["episode"])
+                product_last_any.setdefault(product, {})[variant] = last
+
+    # Per-product, per-episode: best_reward = max(plain, shaped) with carry-forward
+    products_with_data = set()
+    for variant in ("plain", "shaped"):
+        products_with_data.update(histories[variant].keys())
+
+    # best_reward_at[product][ep] = best reward at that episode
+    best_reward_at = {}
+    for product in products_with_data:
+        best_reward_at[product] = {}
+        for ep in episodes:
+            best = -float("inf")
+            for variant in ("plain", "shaped"):
+                evals = histories.get(variant, {}).get(product, [])
+                matched = None
+                for e in evals:
+                    if e["episode"] == ep:
+                        matched = e
+                        break
+                if matched is None:
+                    last = product_last_any.get(product, {}).get(variant)
+                    if last and ep > last["episode"]:
+                        matched = last
+                if matched is not None:
+                    best = max(best, matched["reward"])
+            if best > -float("inf"):
+                best_reward_at[product][ep] = best
+
+    # Compute first_beat_episode per product
+    first_beat = {}
+    for product in products_with_data:
+        bl = baseline_by_product.get(product)
+        if bl is None:
+            continue
+        for ep in episodes:
+            r = best_reward_at[product].get(ep)
+            if r is not None and r > bl:
+                first_beat[product] = ep
+                break
+
+    # Per-episode: cumulative % beating baseline + reward gap stats
+    cum_pct = []
+    gap_mean, gap_p25, gap_p75 = [], [], []
+    for ep in episodes:
+        beats, gaps = 0, []
+        n = 0
+        for product in products_with_data:
+            bl = baseline_by_product.get(product)
+            if bl is None:
+                continue
+            r = best_reward_at[product].get(ep)
+            if r is None:
+                continue
+            n += 1
+            if r > bl:
+                beats += 1
+            gaps.append(r - bl)
+        cum_pct.append(beats / n * 100 if n > 0 else np.nan)
+        if gaps:
+            gap_mean.append(np.mean(gaps))
+            gap_p25.append(np.percentile(gaps, 25))
+            gap_p75.append(np.percentile(gaps, 75))
+        else:
+            gap_mean.append(np.nan)
+            gap_p25.append(np.nan)
+            gap_p75.append(np.nan)
+
+    ep_arr = np.array(episodes)
+    cum_pct = np.array(cum_pct)
+    gap_mean = np.array(gap_mean)
+    gap_p25 = np.array(gap_p25)
+    gap_p75 = np.array(gap_p75)
+
+    # Limit to first 500 episodes for focus
+    mask_500 = ep_arr <= 500
+    ep_500 = ep_arr[mask_500]
+    cum_500 = cum_pct[mask_500]
+    gap_mean_500 = gap_mean[mask_500]
+    gap_p25_500 = gap_p25[mask_500]
+    gap_p75_500 = gap_p75[mask_500]
+
+    # --- Plot ---
+    categories = sorted(set(r["category"] for r in ok_results))
+    cat_colors = _get_category_colors(categories)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Time to Value — RL Model Convergence After Deployment",
+                 fontsize=14, fontweight="bold")
+
+    # Panel 1: Cumulative % beating baseline (hero chart)
+    ax = axes[0, 0]
+    ax.plot(ep_500, cum_500, color="#27AE60", linewidth=2.5, zorder=3)
+    ax.fill_between(ep_500, cum_500, alpha=0.15, color="#27AE60")
+    final_pct = sum(1 for r in ok_results if r.get("beats_baseline")) / len(ok_results) * 100
+    ax.axhline(final_pct, color="gray", linestyle="--", alpha=0.5,
+               label=f"Final eval: {final_pct:.0f}%")
+    # Annotate day 1
+    if len(cum_500) > 0:
+        day1_val = cum_500[0]
+        ax.annotate(f"Day 1: {day1_val:.0f}%", xy=(ep_500[0], day1_val),
+                    xytext=(ep_500[0] + 40, day1_val - 8),
+                    fontsize=9, fontweight="bold", color="#27AE60",
+                    arrowprops=dict(arrowstyle="->", color="#27AE60", lw=1.2))
+    # Annotate day 50
+    idx_50 = np.searchsorted(ep_500, 50)
+    if idx_50 < len(cum_500):
+        day50_val = cum_500[idx_50]
+        ax.annotate(f"Day 50: {day50_val:.0f}%", xy=(ep_500[idx_50], day50_val),
+                    xytext=(ep_500[idx_50] + 40, day50_val - 8),
+                    fontsize=9, fontweight="bold", color="#27AE60",
+                    arrowprops=dict(arrowstyle="->", color="#27AE60", lw=1.2))
+    ax.set_xlabel("Episode (= Day in Production)")
+    ax.set_ylabel("% of Products Beating Baseline")
+    ax.set_title("Cumulative % Beating Baseline")
+    ax.set_ylim(0, 105)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2: Day-1 performance by category
+    ax = axes[0, 1]
+    ep0 = episodes[0] if episodes else 0
+    cat_day1 = {}
+    for cat in categories:
+        cat_products = [r["product"] for r in ok_results
+                        if r["category"] == cat and r["product"] in products_with_data]
+        if not cat_products:
+            cat_day1[cat] = 0
+            continue
+        beats = 0
+        for p in cat_products:
+            r = best_reward_at[p].get(ep0)
+            bl = baseline_by_product.get(p)
+            if r is not None and bl is not None and r > bl:
+                beats += 1
+        cat_day1[cat] = beats / len(cat_products) * 100
+
+    sorted_cats = sorted(categories, key=lambda c: cat_day1[c])
+    bars = ax.barh(sorted_cats, [cat_day1[c] for c in sorted_cats],
+                   color=[cat_colors[c] for c in sorted_cats],
+                   edgecolor="white", linewidth=0.5)
+    for bar, cat in zip(bars, sorted_cats):
+        val = cat_day1[cat]
+        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
+                f"{val:.0f}%", va="center", fontsize=9)
+    ax.set_xlabel("% Beating Baseline at Day 1")
+    ax.set_title("Day-1 Performance by Category")
+    ax.set_xlim(0, 110)
+    ax.grid(True, axis="x", alpha=0.3)
+
+    # Panel 3: Days-to-beat-baseline histogram
+    ax = axes[1, 0]
+    beat_eps = list(first_beat.values())
+    never_beat = len(products_with_data) - len(beat_eps)
+    if beat_eps:
+        max_ep = max(beat_eps)
+        bins = [0] + list(range(1, min(max_ep + 50, 501), max(1, min(max_ep + 50, 501) // 25)))
+        if bins[-1] < max_ep:
+            bins.append(max_ep + 1)
+        ax.hist(beat_eps, bins=bins, color="#2E86C1", edgecolor="white", linewidth=0.5)
+        median_val = np.median(beat_eps)
+        mean_val = np.mean(beat_eps)
+        ax.axvline(median_val, color="#E74C3C", linestyle="--", linewidth=1.5,
+                   label=f"Median: {median_val:.0f} days")
+        ax.axvline(mean_val, color="#E67E22", linestyle=":", linewidth=1.5,
+                   label=f"Mean: {mean_val:.0f} days")
+        ax.legend(fontsize=9)
+    if never_beat > 0:
+        ax.text(0.95, 0.95, f"{never_beat} products never beat baseline",
+                transform=ax.transAxes, ha="right", va="top", fontsize=8,
+                color="#E74C3C", fontstyle="italic")
+    ax.set_xlabel("Days to Beat Baseline (Episode)")
+    ax.set_ylabel("Number of Products")
+    ax.set_title("Distribution: Days to Beat Baseline")
+    ax.grid(True, alpha=0.3)
+
+    # Panel 4: Reward gap over first 500 episodes
+    ax = axes[1, 1]
+    ax.plot(ep_500, gap_mean_500, color="#2E86C1", linewidth=2, label="Mean gap")
+    ax.fill_between(ep_500, gap_p25_500, gap_p75_500, color="#2E86C1", alpha=0.15,
+                    label="25th–75th pctl")
+    ax.axhline(0, color="#E74C3C", linestyle="--", linewidth=1, alpha=0.7, label="Break-even")
+    ax.set_xlabel("Episode (= Day in Production)")
+    ax.set_ylabel("Reward − Baseline Reward")
+    ax.set_title("Reward Gap vs Baseline Over Training")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_time_to_value.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
 def generate_portfolio_plots(portfolio_path, save_dir=None):
     """Generate all portfolio-level visualizations from portfolio_results.json.
 
@@ -1404,8 +1658,9 @@ def generate_portfolio_plots(portfolio_path, save_dir=None):
 
     portfolio_dir = os.path.dirname(portfolio_path)
     plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir)
+    plot_time_to_value(ok_results, portfolio_dir, save_dir)
 
-    print(f"\n  Done! 10 portfolio plots saved to {save_dir}/")
+    print(f"\n  Done! 11 portfolio plots saved to {save_dir}/")
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────
