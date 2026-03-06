@@ -1665,6 +1665,135 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     print(f"  Saved: {path}")
 
 
+def plot_category_time_to_value(ok_results, portfolio_dir, save_dir):
+    """Per-category time-to-value: % beating baseline and reward gap over days.
+
+    Uses actual daily training rewards (1 session/day with exploration).
+    Two panels per category row: win rate trend + reward gap trend.
+    """
+    daily = _load_daily_rewards(portfolio_dir, ok_results)
+    if not daily["plain"] and not daily["shaped"]:
+        print("  [SKIP] No training histories found for category time-to-value plot.")
+        return
+
+    baseline_by = {r["product"]: r["best_baseline_reward"] for r in ok_results}
+    category_by = {r["product"]: r["category"] for r in ok_results}
+
+    products_with_data = set()
+    for v in ("plain", "shaped"):
+        products_with_data.update(daily[v].keys())
+
+    # Best daily reward per product
+    best_daily = {}
+    for p in products_with_data:
+        pr = daily["plain"].get(p, [])
+        sr = daily["shaped"].get(p, [])
+        n = max(len(pr), len(sr))
+        best = []
+        for i in range(n):
+            vals = []
+            if i < len(pr):
+                vals.append(pr[i])
+            if i < len(sr):
+                vals.append(sr[i])
+            best.append(max(vals) if vals else float("nan"))
+        best_daily[p] = best
+
+    max_days = max(len(v) for v in best_daily.values())
+    smooth_window = 30
+    categories = sorted(set(r["category"] for r in ok_results))
+    cat_colors = _get_category_colors(categories)
+
+    fig, axes = plt.subplots(len(categories), 2, figsize=(14, 3 * len(categories)),
+                             sharex=True)
+    fig.suptitle("Time to Value by Category — Actual Daily Performance (1 session/day)",
+                 fontsize=14, fontweight="bold", y=1.0)
+
+    for row, cat in enumerate(categories):
+        cat_products = [p for p in products_with_data if category_by.get(p) == cat]
+        n_sku = len(cat_products)
+        color = cat_colors[cat]
+
+        # Compute daily stats for this category
+        pct_raw = np.full(max_days, np.nan)
+        pct_smooth = np.full(max_days, np.nan)
+        gap_raw = np.full(max_days, np.nan)
+        gap_smooth = np.full(max_days, np.nan)
+
+        pct_hist = []
+        gap_hist = []
+        for day in range(max_days):
+            beats, n = 0, 0
+            gaps = []
+            for p in cat_products:
+                bl = baseline_by.get(p)
+                arr = best_daily.get(p, [])
+                if day >= len(arr) or bl is None:
+                    continue
+                n += 1
+                if arr[day] > bl:
+                    beats += 1
+                gaps.append(arr[day] - bl)
+            if n > 0:
+                pct_raw[day] = beats / n * 100
+                pct_hist.append(pct_raw[day])
+                pct_smooth[day] = np.mean(pct_hist[-smooth_window:])
+            if gaps:
+                gap_raw[day] = np.mean(gaps)
+                gap_hist.append(gap_raw[day])
+                gap_smooth[day] = np.mean(gap_hist[-smooth_window:])
+
+        days = np.arange(max_days)
+
+        # Left panel: % beating baseline
+        ax = axes[row, 0]
+        ax.plot(days, pct_raw, color=color, alpha=0.2, linewidth=0.5)
+        ax.plot(days, pct_smooth, color=color, linewidth=2.5)
+        # Annotate start and end
+        valid = ~np.isnan(pct_smooth)
+        if np.any(valid):
+            first_i = np.argmax(valid)
+            last_i = max_days - 1 - np.argmax(valid[::-1])
+            ax.text(0.02, 0.95, "Day 1: %.0f%%" % pct_smooth[first_i],
+                    transform=ax.transAxes, fontsize=8, fontweight="bold",
+                    va="top", color=color)
+            ax.text(0.98, 0.95, "Day %d: %.0f%%" % (last_i + 1, pct_smooth[last_i]),
+                    transform=ax.transAxes, fontsize=8, fontweight="bold",
+                    va="top", ha="right", color=color)
+        ax.set_ylim(0, 105)
+        ax.set_ylabel("%s (%d)" % (cat, n_sku), fontsize=10, fontweight="bold")
+        ax.grid(True, alpha=0.3)
+        if row == 0:
+            ax.set_title("% Beating Baseline (30-day avg)", fontsize=11)
+
+        # Right panel: reward gap
+        ax = axes[row, 1]
+        ax.plot(days, gap_raw, color=color, alpha=0.2, linewidth=0.5)
+        ax.plot(days, gap_smooth, color=color, linewidth=2.5)
+        ax.axhline(0, color="#E74C3C", linestyle="--", linewidth=1, alpha=0.5)
+        if np.any(~np.isnan(gap_smooth)):
+            first_i = np.argmax(~np.isnan(gap_smooth))
+            last_i = max_days - 1 - np.argmax(~np.isnan(gap_smooth)[::-1])
+            ax.text(0.02, 0.95, "%+.1f" % gap_smooth[first_i],
+                    transform=ax.transAxes, fontsize=8, fontweight="bold",
+                    va="top", color=color)
+            ax.text(0.98, 0.95, "%+.1f" % gap_smooth[last_i],
+                    transform=ax.transAxes, fontsize=8, fontweight="bold",
+                    va="top", ha="right", color=color)
+        ax.grid(True, alpha=0.3)
+        if row == 0:
+            ax.set_title("Mean Reward Gap vs Baseline (30-day avg)", fontsize=11)
+
+    axes[-1, 0].set_xlabel("Day in Production")
+    axes[-1, 1].set_xlabel("Day in Production")
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "portfolio_category_time_to_value.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
 def generate_portfolio_plots(portfolio_path, save_dir=None):
     """Generate all portfolio-level visualizations from portfolio_results.json.
 
@@ -1701,8 +1830,9 @@ def generate_portfolio_plots(portfolio_path, save_dir=None):
     portfolio_dir = os.path.dirname(portfolio_path)
     plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir)
     plot_time_to_value(ok_results, portfolio_dir, save_dir)
+    plot_category_time_to_value(ok_results, portfolio_dir, save_dir)
 
-    print(f"\n  Done! 11 portfolio plots saved to {save_dir}/")
+    print(f"\n  Done! 12 portfolio plots saved to {save_dir}/")
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────
