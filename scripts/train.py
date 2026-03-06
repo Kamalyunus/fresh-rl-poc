@@ -48,6 +48,9 @@ def train(
     tau_end: float = 0.005,
     tau_warmup_steps: int = 0,
     tl_warmup_steps: int = None,
+    tl_epsilon_start: float = None,
+    tl_epsilon_decay: float = None,
+    early_stop_patience: int = None,
 ):
     """Train a DQN agent and save results."""
 
@@ -113,6 +116,8 @@ def train(
     print(f"  Seed:              {seed}")
     if pretrained_path:
         print(f"  Pre-trained:       {os.path.basename(pretrained_path)}")
+    if early_stop_patience is not None:
+        print(f"  Early stopping:    patience={early_stop_patience} episodes")
     print(f"{'='*60}\n")
 
     # Create agent
@@ -141,9 +146,11 @@ def train(
     # Transfer learning: load pre-trained weights
     if pretrained_path:
         agent.load_pretrained(pretrained_path)
-        agent.epsilon = 0.3  # Lower starting exploration for fine-tuning
+        agent.epsilon = tl_epsilon_start if tl_epsilon_start is not None else 0.3
+        if tl_epsilon_decay is not None:
+            agent.epsilon_decay = tl_epsilon_decay
         print(f"  [TRANSFER] Loaded pre-trained weights from {os.path.basename(pretrained_path)}")
-        print(f"  [TRANSFER] Fine-tuning epsilon: {agent.epsilon}")
+        print(f"  [TRANSFER] Fine-tuning epsilon: {agent.epsilon}, decay: {agent.epsilon_decay}")
         # Reduce warmup for TL — pretrained weights don't need full warmup
         original_warmup = warmup_steps
         warmup_steps = tl_warmup_steps if tl_warmup_steps is not None else 0
@@ -194,6 +201,12 @@ def train(
     episode_clearance = []
     greedy_eval_episodes = []  # (episode_idx, mean_reward, mean_revenue, mean_waste, mean_clearance)
     best_reward = -float("inf")
+
+    # Early stopping state
+    best_greedy_reward = -float("inf")
+    greedy_no_improve_count = 0
+    early_stopped = False
+    early_stop_episode = None
 
     # Greedy eval frequency: every 50 episodes, run 20 greedy episodes
     eval_freq = 50
@@ -269,6 +282,14 @@ def train(
             g_reward, g_revenue, g_waste, g_clear = _greedy_eval()
             greedy_eval_episodes.append((ep, g_reward, g_revenue, g_waste, g_clear))
 
+            # Early stopping: track best greedy reward
+            if g_reward > best_greedy_reward:
+                best_greedy_reward = g_reward
+                greedy_no_improve_count = 0
+                agent.save(os.path.join(save_dir, f"best_greedy_{suffix}.pt"))
+            else:
+                greedy_no_improve_count += 1
+
             recent_rewards = episode_rewards[-50:]
             recent_revenue = episode_revenues[-50:]
             recent_waste = episode_wastes[-50:]
@@ -282,6 +303,20 @@ def train(
                 f"Eps: {agent.epsilon:.3f} | "
                 f"Greedy: {g_reward:6.1f}"
             )
+
+            # Check early stopping condition
+            if early_stop_patience is not None and greedy_no_improve_count * eval_freq >= early_stop_patience:
+                early_stopped = True
+                early_stop_episode = ep + 1
+                print(f"\n  [EARLY STOP] No greedy improvement for {early_stop_patience} episodes. "
+                      f"Stopping at episode {ep+1}.")
+                break
+
+    # Reload best greedy checkpoint if it exists (early stop or normal completion)
+    best_greedy_path = os.path.join(save_dir, f"best_greedy_{suffix}.pt")
+    if os.path.exists(best_greedy_path):
+        agent.load_pretrained(best_greedy_path)
+        agent.epsilon = 0.0  # Best model should be greedy
 
     # Save final agent
     agent.save(os.path.join(save_dir, f"final_agent_{suffix}.pt"))
@@ -316,15 +351,17 @@ def train(
             for e, r, rev, w, c in greedy_eval_episodes
         ],
         "best_reward": best_reward,
+        "early_stopped": early_stopped,
+        "early_stop_episode": early_stop_episode,
         "timestamp": datetime.now().isoformat(),
     }
     with open(os.path.join(save_dir, f"training_history_{suffix}.json"), "w") as f:
         json.dump(history, f, indent=2)
 
     print(f"\n{'='*60}")
-    print(f"  Training Complete!")
-    print(f"  Best reward:  {best_reward:.1f}")
-    print(f"  Final epsilon: {agent.epsilon:.4f}")
+    print(f"  Training Complete!" + (f" (early stopped at ep {early_stop_episode})" if early_stopped else ""))
+    print(f"  Best greedy reward: {best_greedy_reward:.1f}")
+    print(f"  Best episode reward: {best_reward:.1f}")
     print(f"  Results saved to: {save_dir}/")
     print(f"{'='*60}")
 
@@ -368,6 +405,16 @@ if __name__ == "__main__":
     parser.add_argument("--tl-warmup-steps", type=int, default=None,
                         help="Override warmup steps when using pretrained weights (default: 0 = skip warmup)")
 
+    # Transfer learning epsilon
+    parser.add_argument("--tl-epsilon-start", type=float, default=None,
+                        help="Starting epsilon for TL fine-tuning (default: 0.3)")
+    parser.add_argument("--tl-epsilon-decay", type=float, default=None,
+                        help="Epsilon decay for TL fine-tuning (default: use standard decay)")
+
+    # Early stopping
+    parser.add_argument("--early-stop-patience", type=int, default=None,
+                        help="Stop training after this many episodes without greedy reward improvement (default: disabled)")
+
     args = parser.parse_args()
 
     if args.list_products:
@@ -392,4 +439,7 @@ if __name__ == "__main__":
         tau_end=args.tau_end,
         tau_warmup_steps=args.tau_warmup_steps,
         tl_warmup_steps=args.tl_warmup_steps,
+        tl_epsilon_start=args.tl_epsilon_start,
+        tl_epsilon_decay=args.tl_epsilon_decay,
+        early_stop_patience=args.early_stop_patience,
     )

@@ -406,6 +406,9 @@ def _run_single_product(
     tau_end: float = 0.005,
     tau_warmup_steps: int = 0,
     tl_warmup_steps: int = None,
+    tl_epsilon_start: float = None,
+    tl_epsilon_decay: float = None,
+    early_stop_patience: int = None,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict."""
     # Imports inside worker to avoid pickling issues
@@ -451,6 +454,9 @@ def _run_single_product(
         tau_end=tau_end,
         tau_warmup_steps=tau_warmup_steps,
         tl_warmup_steps=tl_warmup_steps,
+        tl_epsilon_start=tl_epsilon_start,
+        tl_epsilon_decay=tl_epsilon_decay,
+        early_stop_patience=early_stop_patience,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -513,12 +519,45 @@ def _run_single_product(
 
         baselines = get_all_baselines(n_actions=n_actions, seed=seed)
 
+        # Baseline caching: deterministic baselines can be cached across runs
+        cache_key = {
+            "seed": seed, "step_hours": step_hours, "eval_episodes": eval_episodes,
+            "demand_mult": demand_mult, "inventory_mult": inventory_mult,
+        }
+        cache_path = os.path.join(product_dir, "baseline_cache.json")
+        cached_baselines = None
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    cache_data = json.load(f)
+                if cache_data.get("cache_key") == cache_key:
+                    cached_baselines = cache_data["baselines"]
+                    print(f"    {product}: using cached baseline results")
+            except Exception:
+                pass  # cache corrupt, re-evaluate
+
         eval_results = {}
-        for policy in [agent_plain, agent_shaped] + baselines:
-            is_dqn = isinstance(policy, DQNAgent)
-            name = policy.name if hasattr(policy, "name") else str(policy)
-            er = evaluate_policy(env, policy, n_episodes=eval_episodes, seed=seed, is_dqn=is_dqn)
+        # Always evaluate DQN agents (weights change every run)
+        for policy in [agent_plain, agent_shaped]:
+            name = policy.name
+            er = evaluate_policy(env, policy, n_episodes=eval_episodes, seed=seed, is_dqn=True)
             eval_results[name] = er
+
+        if cached_baselines is not None:
+            eval_results.update(cached_baselines)
+        else:
+            baseline_cache = {}
+            for policy in baselines:
+                name = policy.name if hasattr(policy, "name") else str(policy)
+                er = evaluate_policy(env, policy, n_episodes=eval_episodes, seed=seed, is_dqn=False)
+                eval_results[name] = er
+                baseline_cache[name] = er
+            # Save baseline cache
+            try:
+                with open(cache_path, "w") as f:
+                    json.dump({"cache_key": cache_key, "baselines": baseline_cache}, f, indent=2, default=str)
+            except Exception:
+                pass  # non-critical
 
         # Extract key metrics
         plain_r = eval_results["DQN Plain"]
@@ -796,8 +835,8 @@ def main():
                         help="Epsilon decay rate per episode (default: 0.998 for 2h, 0.997 for 4h)")
     parser.add_argument("--hidden-dim", type=int, default=64,
                         help="Hidden layer size for DQN network (default: 64)")
-    parser.add_argument("--replay-ratio", type=int, default=1,
-                        help="Gradient steps per environment step (default: 1)")
+    parser.add_argument("--replay-ratio", type=int, default=None,
+                        help="Gradient steps per environment step (default: 2 for pooled-TL, 1 otherwise)")
     parser.add_argument("--batch-size", type=int, default=32,
                         help="Batch size for DQN training (default: 32)")
     parser.add_argument("--buffer-size", type=int, default=10000,
@@ -819,6 +858,16 @@ def main():
     parser.add_argument("--tl-warmup-steps", type=int, default=None,
                         help="Override warmup steps when using pretrained weights (default: 0 = skip warmup)")
 
+    # Transfer learning epsilon
+    parser.add_argument("--tl-epsilon-start", type=float, default=None,
+                        help="Starting epsilon for TL fine-tuning (default: 0.15 for pooled-TL, 0.3 otherwise)")
+    parser.add_argument("--tl-epsilon-decay", type=float, default=None,
+                        help="Epsilon decay for TL fine-tuning (default: 0.997 for pooled-TL, standard otherwise)")
+
+    # Early stopping
+    parser.add_argument("--early-stop-patience", type=int, default=None,
+                        help="Stop training after this many episodes without greedy reward improvement (default: disabled)")
+
     # Transfer learning
     parser.add_argument("--transfer-learning", action="store_true",
                         help="Pre-train per category, then fine-tune per SKU")
@@ -838,6 +887,15 @@ def main():
                         help="Path to pooled results directory (default: results/portfolio_v2_pooled)")
 
     args = parser.parse_args()
+
+    # Resolve mode-dependent defaults
+    if args.replay_ratio is None:
+        args.replay_ratio = 2 if args.pooled_tl else 1
+    if args.pooled_tl:
+        if args.tl_epsilon_start is None:
+            args.tl_epsilon_start = 0.15
+        if args.tl_epsilon_decay is None:
+            args.tl_epsilon_decay = 0.997
 
     # Build product list
     if args.products:
@@ -892,6 +950,9 @@ def main():
         print(f"  Pooled mode:    ON ({args.pooled_episodes_per_sku} eps/SKU)")
     if args.pooled_tl:
         print(f"  Pooled TL:      ON (from {args.pooled_model_dir})")
+        print(f"  TL epsilon:     {args.tl_epsilon_start} (decay: {args.tl_epsilon_decay})")
+    if args.early_stop_patience is not None:
+        print(f"  Early stopping: patience={args.early_stop_patience} episodes")
     print(f"  Workers:        {args.workers}")
     print(f"  Save dir:       {args.save_dir}")
     print(f"{'='*70}\n")
@@ -1030,6 +1091,9 @@ def main():
             tau_end=args.tau_end,
             tau_warmup_steps=args.tau_warmup_steps,
             tl_warmup_steps=args.tl_warmup_steps,
+            tl_epsilon_start=args.tl_epsilon_start,
+            tl_epsilon_decay=args.tl_epsilon_decay,
+            early_stop_patience=args.early_stop_patience,
         )
 
         all_results = []
@@ -1131,6 +1195,9 @@ def main():
         tau_end=args.tau_end,
         tau_warmup_steps=args.tau_warmup_steps,
         tl_warmup_steps=args.tl_warmup_steps,
+        tl_epsilon_start=args.tl_epsilon_start,
+        tl_epsilon_decay=args.tl_epsilon_decay,
+        early_stop_patience=args.early_stop_patience,
     )
 
     # ── Phase 1: Category pre-training (if transfer learning enabled) ────

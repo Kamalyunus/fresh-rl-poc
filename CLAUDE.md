@@ -136,7 +136,7 @@ deployment/
 
 - **DEPLOYMENT.md** — Production deployment guide: data requirements, state vector construction, historical prefill pipeline, online RL architecture, rollout phases, safety guardrails, monitoring, and maintenance.
 - **ARCHITECTURE.md** — Technical architecture deep-dive: MDP formulation, algorithms, data structures, training pipeline.
-- **EXPERIMENTS.md** — Full experiment log (22 iterations from v1.0 through v3.2, production hardening, and time-to-value visualization).
+- **EXPERIMENTS.md** — Full experiment log (23 iterations from v1.0 through v4.0, production hardening, and time-to-value visualization).
 
 ## Results Directory Structure
 
@@ -151,6 +151,11 @@ results/portfolio_v30_pooled_tl/       — v3.0 results (94%, 3000ep, tau schedu
 results/portfolio_v31_sample_eff/      — v3.1 results (87%, sample efficiency experiment — regression)
 
 results/portfolio_v32_conservative_es/ — v3.2 results (92%, conservative early stopping)
+
+results/portfolio_v40_365ep_pooled/    — v4.0 pooled models (53%, 365ep/SKU realistic budget)
+  _pooled_{category}/                  — Category model checkpoints (.pt)
+
+results/portfolio_v40_365ep_pooled_tl/ — v4.0 TL results (76%, 365ep realistic budget)
 
 results/portfolio_v2_pooled/           — Pooled category models (v2, 78%)
   _pooled_{category}/                  — Category model checkpoints (.pt, used by TL)
