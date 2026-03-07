@@ -51,6 +51,19 @@ python scripts/run_portfolio.py --pooled-tl \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
     --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000
 
+# Run production-realistic evaluation (v4.1, paired daily comparison)
+python scripts/run_portfolio.py --pooled-tl \
+    --pooled-model-dir results/portfolio_v40_365ep_pooled \
+    --episodes 365 \
+    --step-hours 2 --per --prefill --prefill-episodes 365 \
+    --warmup-steps 200 --tl-warmup-steps 200 \
+    --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000 \
+    --tl-epsilon-start 0.3 --replay-ratio 1 \
+    --save-dir results/portfolio_v41_production_eval
+
 # Visualize portfolio results
 python scripts/visualize.py --portfolio results/portfolio_v21_pooled_tl/portfolio_results.json
 
@@ -112,8 +125,9 @@ deployment/
 - **N-step returns**: `NStepAccumulator` sits between `store_transition()` and replay buffer. Flushes at episode boundaries. Compatible with PER and shaping.
 - **Pooled training**: `PooledCategoryEnv` holds one `MarkdownProductEnv` per SKU. `reset(options={"product": name})` switches active product. `__getattr__` delegates to active env so baselines work unchanged.
 - **Pooled TL (v2.1)**: `AugmentedProductEnv` wraps per-SKU env to append 4 product features (10->14 dim), matching pooled model input. Pooled weights transfer directly via `load_pretrained()` — no weight surgery needed.
-- **Evaluation**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Same function used for both per-SKU and pooled modes.
-- **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either.
+- **Evaluation (greedy)**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Used for baseline identification and pooled mode eval.
+- **Evaluation (production-realistic)**: `train()` accepts `best_baseline` param. Each episode uses deterministic seeding (`seed + ep`) and replays baseline on same seed. `baseline_rewards` tracked in training history. `beats_baseline` = last-30-day win rate > 50%. No post-training greedy eval.
+- **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either. v4.1+ results include `best_win_rate`, `plain_win_rate`, `shaped_win_rate`.
 - **Model metrics**: `compute_avg_q()` and `mean_loss` tracked as proxy quality signals in production (no simulator). Written to `metrics.json` alongside checkpoints.
 - **Safety rollback**: Auto-reverts to `agent_prev.pt` when avg_q drops >30% or loss spikes >3x. Resets epsilon to 0.15 for re-exploration.
 - **Epsilon floor**: Production epsilon clamped to `EPSILON_FLOOR=0.05` to prevent over-exploitation.
@@ -136,7 +150,7 @@ deployment/
 
 - **DEPLOYMENT.md** — Production deployment guide: data requirements, state vector construction, historical prefill pipeline, online RL architecture, rollout phases, safety guardrails, monitoring, and maintenance.
 - **ARCHITECTURE.md** — Technical architecture deep-dive: MDP formulation, algorithms, data structures, training pipeline.
-- **EXPERIMENTS.md** — Full experiment log (23 iterations from v1.0 through v4.0, production hardening, and time-to-value visualization).
+- **EXPERIMENTS.md** — Full experiment log (24 iterations from v1.0 through v4.1, production hardening, time-to-value visualization, and production-realistic evaluation).
 
 ## Results Directory Structure
 
@@ -156,6 +170,10 @@ results/portfolio_v40_365ep_pooled/    — v4.0 pooled models (53%, 365ep/SKU re
   _pooled_{category}/                  — Category model checkpoints (.pt)
 
 results/portfolio_v40_365ep_pooled_tl/ — v4.0 TL results (83%, 365ep realistic budget)
+
+results/portfolio_v41_production_eval/ — v4.1 TL results (39%, production-realistic daily eval)
+  portfolio_results.json               — Includes per-episode baseline_rewards for paired comparison
+  {product_name}/training_history_*.json — Contains baseline_rewards array
 
 results/portfolio_v2_pooled/           — Pooled category models (v2, 78%)
   _pooled_{category}/                  — Category model checkpoints (.pt, used by TL)

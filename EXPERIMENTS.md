@@ -1446,3 +1446,75 @@ python scripts/run_portfolio.py --pooled-tl \
 6. **20.5 min total runtime**: 4× faster than v3.0's 82+ min (which didn't include pooled training time). The realistic-budget experiment is dramatically cheaper to run.
 
 **Takeaway**: With realistic data budgets (365 ep/SKU), pooled-TL achieves 83% beats-baseline (final eval) with a 30-day rolling average of 76% on actual daily sessions. The 11pp drop from v3.0's 94% is modest given the 14× reduction in data. No product badly loses — all 26 non-winners are within 6 reward of baseline.
+
+## Iteration 24: Production-Realistic Daily Evaluation (v4.1 — 39% beats-baseline)
+
+**Context**: Prior iterations used a post-training 100-episode greedy evaluation (epsilon=0) to determine `beats_baseline`. This is unrealistic — in production, there's no separate evaluation phase. Each day has exactly 1 session per SKU, the DQN agent picks actions with exploration noise, and the baseline could have run on the same demand realization. This iteration replaces post-training greedy eval with **paired per-episode DQN vs baseline comparison on the same demand seed**, tracked throughout training.
+
+**Key code changes**:
+1. **`train.py`**: Added `best_baseline` parameter. Each episode uses explicit seeding (`seed + ep`) so the baseline can replay the same demand. After each DQN episode, the baseline runs on the same seed. `baseline_rewards` tracked in training history JSON. Logging shows daily win rate.
+2. **`run_portfolio.py`**: Baseline evaluation moved before training (to identify best baseline policy). Best baseline policy object passed to `train()`. Post-training greedy DQN eval removed entirely. `beats_baseline` = last-30-day win rate > 50%.
+3. **`visualize.py`**: Time-to-value charts use paired daily comparisons when `baseline_rewards` available, with fallback to fixed baseline for old results.
+
+**Setup**: Pooled-TL with v4.0 pooled models, 365 episodes, prefill (365 episodes of historical data), 200 warmup gradient steps for per-SKU adaptation, same hard mode settings.
+
+```bash
+python scripts/run_portfolio.py --pooled-tl \
+    --pooled-model-dir results/portfolio_v40_365ep_pooled \
+    --episodes 365 \
+    --step-hours 2 --per --prefill --prefill-episodes 365 \
+    --warmup-steps 200 --tl-warmup-steps 200 \
+    --workers 16 \
+    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000 \
+    --tl-epsilon-start 0.3 --replay-ratio 1 \
+    --save-dir results/portfolio_v41_production_eval
+```
+
+**Results**: **58/150 (39%) beats-baseline** by last-30-day win rate > 50%. Runtime: 11.4 minutes.
+
+| Metric | v4.1 (daily eval) | v4.0 (greedy eval) | Note |
+|--------|-------------------|-------------------|------|
+| Beats baseline | 58/150 (39%) | 124/150 (83%) | Different metrics |
+| Win rate > 45% | 77/150 (51%) | — | Near-threshold |
+| Win rate > 40% | 85/150 (57%) | — | Competitive |
+| Win rate > 35% | 106/150 (71%) | — | Learning signal |
+| Win rate > 30% | 117/150 (78%) | — | Non-trivial |
+| Runtime | 11.4 min | 10.3 min | Slightly slower (baseline replay) |
+
+**Category win rates** (beats_baseline = win rate > 50%):
+| Category | Beats% | Avg Win Rate | SKUs |
+|----------|--------|-------------|------|
+| deli_prepared | 45% | 53% | 22 |
+| seafood | 45% | 52% | 22 |
+| meats | 41% | 52% | 22 |
+| dairy | 43% | 48% | 21 |
+| vegetables | 43% | 47% | 21 |
+| bakery | 29% | 43% | 21 |
+| fruits | 24% | 44% | 21 |
+
+**Non-winners analysis** (92 products):
+- Mean win rate: 35% — most non-winners are competitive, not badly losing
+- 39 products have win rate >= 40% (near-ties, just below threshold)
+- Only 5 products have win rate < 20%
+
+**Why 39% vs 83%**: The gap is entirely explained by the evaluation methodology change:
+1. **Exploration noise**: DQN runs with epsilon 0.3→0.1 during training, while baseline is deterministic. Every exploratory action is a potential loss on that day.
+2. **Same-seed pairing**: Each episode compares DQN vs baseline on identical demand. With greedy eval, DQN ran on different seeds than the baseline eval — averaging over many seeds masked per-episode variance.
+3. **No checkpoint cherry-picking**: Greedy eval used the best checkpoint (epsilon=0). Daily eval reflects actual training performance with exploration.
+4. **Prefill + warmup**: 200 warmup steps on 365 prefill episodes give a warm start (~1.5x resampling of transitions), adapting pooled weights to each SKU's characteristics.
+
+**Key observations**:
+
+1. **The 83% number was inflated**: Greedy eval (epsilon=0, best checkpoint, 100 averaged episodes) overstated production performance. The 39% daily win rate is what a business would actually experience.
+
+2. **Most products are competitive**: 85/150 (57%) have win rate > 40%, meaning they're near-parity with baseline. The agent rarely badly loses — it's the exploration overhead that prevents consistent wins.
+
+3. **Exploration is the main cost**: With epsilon starting at 0.3 and decaying to ~0.1 by day 365, the agent makes random (suboptimal) actions 10-30% of the time. Each random action on a real day is a real business cost.
+
+4. **Prefill warmup works**: 200 warmup steps on 365 prefill episodes gives the agent a warm start without overfitting. No day-1 spike-then-drop pattern observed.
+
+5. **Categories with higher demand are easier**: Deli_prepared and seafood (45% beats) have higher per-step revenue, making the reward signal stronger relative to exploration noise.
+
+**Takeaway**: Production-realistic evaluation with paired daily comparison reveals that the DQN agent beats baseline on only 39% of SKUs (last-30-day win rate > 50%), compared to 83% with the previous greedy eval. The gap is driven by exploration noise — the agent is competitive on 57% of SKUs (win rate > 40%) but exploration costs push many just below the 50% threshold. This is the honest metric for stakeholder communication: the agent needs epsilon reduction strategies or longer training to consistently outperform in production.

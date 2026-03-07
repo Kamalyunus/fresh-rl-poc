@@ -52,6 +52,8 @@ def train(
     tl_epsilon_decay: float = None,
     early_stop_patience: int = None,
     greedy_eval_n: int = 20,
+    prefill_transitions_path: str = None,
+    best_baseline=None,
 ):
     """Train a DQN agent and save results."""
 
@@ -109,7 +111,10 @@ def train(
     print(f"  PER:               {use_per}")
     if tau_warmup_steps > 0:
         print(f"  Tau schedule:      {tau_start} → {tau_end} over {tau_warmup_steps} steps")
-    if prefill:
+    if prefill_transitions_path and os.path.exists(prefill_transitions_path):
+        print(f"  Pre-fill:          from pooled transitions")
+        print(f"  Warm-up steps:     {warmup_steps}")
+    elif prefill:
         print(f"  Pre-fill:          {prefill_episodes} episodes")
         print(f"  Warm-up steps:     {warmup_steps}")
         if warmup_epsilon is not None:
@@ -158,7 +163,21 @@ def train(
         print(f"  [TRANSFER] Warmup steps adjusted: {original_warmup} → {warmup_steps}\n")
 
     # Pre-fill phase: load historical data into replay buffer
-    if prefill:
+    if prefill_transitions_path and os.path.exists(prefill_transitions_path):
+        data = np.load(prefill_transitions_path)
+        has_per = hasattr(agent.replay_buffer, 'max_priority')
+        if has_per:
+            old_max = agent.replay_buffer.max_priority
+            agent.replay_buffer.max_priority = 5.0
+        for i in range(len(data['actions'])):
+            agent.store_transition(
+                data['states'][i], data['actions'][i], float(data['rewards'][i]),
+                data['next_states'][i], bool(data['dones'][i]), data['masks'][i],
+            )
+        if has_per:
+            agent.replay_buffer.max_priority = old_max
+        print(f"  [PRE-FILL] Loaded {len(data['actions'])} transitions from pooled training\n")
+    elif prefill:
         from fresh_rl.historical_data import HistoricalDataGenerator
         print("  [PRE-FILL] Generating historical data...")
         generator = HistoricalDataGenerator(
@@ -200,6 +219,7 @@ def train(
     episode_revenues = []
     episode_wastes = []
     episode_clearance = []
+    baseline_rewards = []  # per-episode baseline replay on same seed (None if no baseline)
     greedy_eval_episodes = []  # (episode_idx, mean_reward, mean_revenue, mean_waste, mean_clearance)
     best_reward = -float("inf")
 
@@ -243,7 +263,7 @@ def train(
         return np.mean(eval_rewards), np.mean(eval_revenues), np.mean(eval_wastes), np.mean(eval_clears)
 
     for ep in range(n_episodes):
-        obs, _ = env.reset()
+        obs, _ = env.reset(seed=seed + ep)
         total_reward = 0.0
         done = False
 
@@ -263,6 +283,20 @@ def train(
 
             obs = next_obs
             total_reward += reward
+
+        # Replay same demand with baseline policy (production-realistic comparison)
+        bl_reward = None
+        if best_baseline is not None:
+            bl_obs, _ = env.reset(seed=seed + ep)
+            bl_done = False
+            bl_total = 0.0
+            while not bl_done:
+                bl_action = best_baseline.select_action(bl_obs, env=env)
+                bl_obs, bl_r, bl_term, bl_trunc, _ = env.step(bl_action)
+                bl_done = bl_term or bl_trunc
+                bl_total += bl_r
+            bl_reward = bl_total
+        baseline_rewards.append(bl_reward)
 
         # End of episode
         agent.decay_epsilon()
@@ -295,6 +329,14 @@ def train(
             recent_revenue = episode_revenues[-50:]
             recent_waste = episode_wastes[-50:]
             recent_clear = episode_clearance[-50:]
+            win_str = ""
+            if best_baseline is not None:
+                recent_bl = baseline_rewards[-50:]
+                recent_ep = episode_rewards[-50:]
+                daily_wins = sum(1 for e, b in zip(recent_ep, recent_bl) if b is not None and e > b)
+                daily_total = sum(1 for b in recent_bl if b is not None)
+                if daily_total > 0:
+                    win_str = f" | Win%: {daily_wins/daily_total*100:.0f}%"
             print(
                 f"  Episode {ep+1:4d}/{n_episodes} | "
                 f"Reward: {np.mean(recent_rewards):8.1f} | "
@@ -302,7 +344,7 @@ def train(
                 f"Waste: {np.mean(recent_waste)*100:5.1f}% | "
                 f"Clear: {np.mean(recent_clear)*100:5.1f}% | "
                 f"Eps: {agent.epsilon:.3f} | "
-                f"Greedy: {g_reward:6.1f}"
+                f"Greedy: {g_reward:6.1f}{win_str}"
             )
 
             # Check early stopping condition
@@ -346,6 +388,7 @@ def train(
         "episode_revenues": episode_revenues,
         "episode_wastes": episode_wastes,
         "episode_clearance": episode_clearance,
+        "baseline_rewards": baseline_rewards,
         "losses": agent.losses[-2000:],
         "greedy_eval": [
             {"episode": e, "reward": r, "revenue": rev, "waste": w, "clearance": c}

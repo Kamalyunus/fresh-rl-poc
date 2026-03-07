@@ -1403,10 +1403,11 @@ def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
 def _load_daily_rewards(portfolio_dir, results):
     """Load per-episode training rewards from training history files.
 
-    Returns dict with keys 'plain' and 'shaped', each mapping product name to
-    a list of daily rewards (one per episode/day).
+    Returns dict with keys 'plain', 'shaped', 'plain_baseline', 'shaped_baseline',
+    each mapping product name to a list of daily rewards (one per episode/day).
+    Baseline rewards are from per-episode baseline replay (None entries if unavailable).
     """
-    daily = {"plain": {}, "shaped": {}}
+    daily = {"plain": {}, "shaped": {}, "plain_baseline": {}, "shaped_baseline": {}}
     for r in results:
         product = r["product"]
         product_dir = os.path.join(portfolio_dir, product)
@@ -1428,6 +1429,9 @@ def _load_daily_rewards(portfolio_dir, results):
                 continue
             variant = "shaped" if "_shaped" in fname else "plain"
             daily[variant][product] = rewards
+            bl_rewards = hist.get("baseline_rewards", [])
+            if bl_rewards:
+                daily[f"{variant}_baseline"][product] = bl_rewards
     return daily
 
 
@@ -1436,6 +1440,10 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
 
     Uses actual daily training rewards (1 session per day, with exploration)
     to show realistic production performance over time.
+
+    When per-episode baseline replay data is available (baseline_rewards in
+    training histories), uses paired daily comparisons. Otherwise falls back
+    to comparing against the fixed best_baseline_reward.
     """
     daily = _load_daily_rewards(portfolio_dir, ok_results)
     if not daily["plain"] and not daily["shaped"]:
@@ -1444,6 +1452,9 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
 
     baseline_by_product = {r["product"]: r["best_baseline_reward"] for r in ok_results}
     category_by_product = {r["product"]: r["category"] for r in ok_results}
+
+    # Check if paired baseline data is available
+    has_paired = bool(daily["plain_baseline"] or daily["shaped_baseline"])
 
     # Find products with data and max episode count
     products_with_data = set()
@@ -1458,23 +1469,39 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
         return
     days = np.arange(max_days)
 
-    # Per-product, per-day: best daily reward = max(plain, shaped)
-    # Each day is one real session with exploration noise
-    best_daily = {}  # product -> array of daily rewards
+    # Per-product, per-day: best daily DQN reward and best daily baseline reward
+    best_daily = {}  # product -> array of best DQN rewards
+    best_daily_bl = {}  # product -> array of baseline rewards (paired or fixed)
     for product in products_with_data:
         plain_r = daily["plain"].get(product, [])
         shaped_r = daily["shaped"].get(product, [])
+        plain_bl = daily["plain_baseline"].get(product, [])
+        shaped_bl = daily["shaped_baseline"].get(product, [])
         n = max(len(plain_r), len(shaped_r))
         best = np.full(n, np.nan)
+        bl_arr = np.full(n, np.nan)
+        fixed_bl = baseline_by_product.get(product)
         for i in range(n):
-            vals = []
+            # Best DQN reward across variants
+            dqn_vals = []
             if i < len(plain_r):
-                vals.append(plain_r[i])
+                dqn_vals.append(plain_r[i])
             if i < len(shaped_r):
-                vals.append(shaped_r[i])
-            if vals:
-                best[i] = max(vals)
+                dqn_vals.append(shaped_r[i])
+            if dqn_vals:
+                best[i] = max(dqn_vals)
+            # Paired baseline reward (max across variants), or fixed fallback
+            bl_vals = []
+            if i < len(plain_bl) and plain_bl[i] is not None:
+                bl_vals.append(plain_bl[i])
+            if i < len(shaped_bl) and shaped_bl[i] is not None:
+                bl_vals.append(shaped_bl[i])
+            if bl_vals:
+                bl_arr[i] = max(bl_vals)
+            elif fixed_bl is not None:
+                bl_arr[i] = fixed_bl
         best_daily[product] = best
+        best_daily_bl[product] = bl_arr
 
     # Per-day: raw % of products beating baseline + reward gaps
     smooth_window = 30  # 30-day rolling average for trend
@@ -1489,16 +1516,16 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
         beats, n = 0, 0
         gaps = []
         for product in products_with_data:
-            bl = baseline_by_product.get(product)
-            if bl is None:
-                continue
             arr = best_daily[product]
+            bl_arr = best_daily_bl[product]
             if day >= len(arr) or np.isnan(arr[day]):
                 continue
+            if day >= len(bl_arr) or np.isnan(bl_arr[day]):
+                continue
             n += 1
-            if arr[day] > bl:
+            if arr[day] > bl_arr[day]:
                 beats += 1
-            gaps.append(arr[day] - bl)
+            gaps.append(arr[day] - bl_arr[day])
         if n > 0:
             raw_pct[day] = beats / n * 100
             pct_history.append(raw_pct[day])
@@ -1512,16 +1539,18 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     # First day each product's 30-day rolling avg beats baseline
     first_beat = {}
     for product in products_with_data:
-        bl = baseline_by_product.get(product)
-        if bl is None:
-            continue
         arr = best_daily[product]
-        rolling = []
+        bl_arr = best_daily_bl[product]
+        rolling_dqn = []
+        rolling_bl = []
         for day in range(len(arr)):
             if not np.isnan(arr[day]):
-                rolling.append(arr[day])
-            window = rolling[-smooth_window:]
-            if window and np.mean(window) > bl:
+                rolling_dqn.append(arr[day])
+            if day < len(bl_arr) and not np.isnan(bl_arr[day]):
+                rolling_bl.append(bl_arr[day])
+            win_dqn = rolling_dqn[-smooth_window:]
+            win_bl = rolling_bl[-smooth_window:]
+            if win_dqn and win_bl and np.mean(win_dqn) > np.mean(win_bl):
                 first_beat[product] = day
                 break
 
@@ -1534,7 +1563,8 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     cat_colors = _get_category_colors(categories)
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Time to Value — Actual Daily Performance After Deployment",
+    comparison_mode = "Paired Daily Comparison" if has_paired else "vs Fixed Baseline"
+    fig.suptitle(f"Time to Value — Actual Daily Performance ({comparison_mode})",
                  fontsize=14, fontweight="bold")
 
     # Panel 1: % beating baseline over time (hero chart)
@@ -1580,9 +1610,12 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
             continue
         beats = 0
         for p in cat_products:
-            bl = baseline_by_product.get(p)
             arr = best_daily.get(p)
-            if arr is not None and len(arr) > 0 and bl is not None and arr[0] > bl:
+            bl_arr = best_daily_bl.get(p)
+            if (arr is not None and len(arr) > 0 and
+                    bl_arr is not None and len(bl_arr) > 0 and
+                    not np.isnan(arr[0]) and not np.isnan(bl_arr[0]) and
+                    arr[0] > bl_arr[0]):
                 beats += 1
         cat_day1[cat] = beats / len(cat_products) * 100
 
@@ -1669,6 +1702,7 @@ def plot_category_time_to_value(ok_results, portfolio_dir, save_dir):
     """Per-category time-to-value: % beating baseline and reward gap over days.
 
     Uses actual daily training rewards (1 session/day with exploration).
+    When per-episode baseline replay data is available, uses paired comparisons.
     Two panels per category row: win rate trend + reward gap trend.
     """
     daily = _load_daily_rewards(portfolio_dir, ok_results)
@@ -1683,21 +1717,40 @@ def plot_category_time_to_value(ok_results, portfolio_dir, save_dir):
     for v in ("plain", "shaped"):
         products_with_data.update(daily[v].keys())
 
-    # Best daily reward per product
+    # Best daily DQN reward and baseline reward per product
     best_daily = {}
+    best_daily_bl = {}
     for p in products_with_data:
         pr = daily["plain"].get(p, [])
         sr = daily["shaped"].get(p, [])
+        pr_bl = daily["plain_baseline"].get(p, [])
+        sr_bl = daily["shaped_baseline"].get(p, [])
         n = max(len(pr), len(sr))
         best = []
+        bl_arr = []
+        fixed_bl = baseline_by.get(p)
         for i in range(n):
+            # Best DQN
             vals = []
             if i < len(pr):
                 vals.append(pr[i])
             if i < len(sr):
                 vals.append(sr[i])
             best.append(max(vals) if vals else float("nan"))
+            # Paired baseline or fixed fallback
+            bl_vals = []
+            if i < len(pr_bl) and pr_bl[i] is not None:
+                bl_vals.append(pr_bl[i])
+            if i < len(sr_bl) and sr_bl[i] is not None:
+                bl_vals.append(sr_bl[i])
+            if bl_vals:
+                bl_arr.append(max(bl_vals))
+            elif fixed_bl is not None:
+                bl_arr.append(fixed_bl)
+            else:
+                bl_arr.append(float("nan"))
         best_daily[p] = best
+        best_daily_bl[p] = bl_arr
 
     max_days = max(len(v) for v in best_daily.values())
     smooth_window = 30
@@ -1726,14 +1779,18 @@ def plot_category_time_to_value(ok_results, portfolio_dir, save_dir):
             beats, n = 0, 0
             gaps = []
             for p in cat_products:
-                bl = baseline_by.get(p)
                 arr = best_daily.get(p, [])
-                if day >= len(arr) or bl is None:
+                bl_arr = best_daily_bl.get(p, [])
+                if day >= len(arr) or day >= len(bl_arr):
+                    continue
+                dqn_r = arr[day]
+                bl_r = bl_arr[day]
+                if dqn_r != dqn_r or bl_r != bl_r:  # NaN check
                     continue
                 n += 1
-                if arr[day] > bl:
+                if dqn_r > bl_r:
                     beats += 1
-                gaps.append(arr[day] - bl)
+                gaps.append(dqn_r - bl_r)
             if n > 0:
                 pct_raw[day] = beats / n * 100
                 pct_hist.append(pct_raw[day])

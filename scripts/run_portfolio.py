@@ -228,6 +228,10 @@ def _train_category_pooled(
 
     results = []
 
+    # Collect transitions per product during plain variant training
+    from collections import defaultdict
+    transitions_by_product = defaultdict(list)
+
     for variant, shaping in [("plain", False), ("shaped", True)]:
         # Compute initial waste_cost_scale from first product (will be updated per-episode)
         first_profile = catalog[products[0]]
@@ -253,6 +257,7 @@ def _train_category_pooled(
                 agent.train_step_fn()
 
         # Training: round-robin through products
+        collect_transitions = (variant == "plain")
         for ep in range(total_episodes):
             product = products[ep % len(products)]
             inner_env = env._envs[product]
@@ -274,6 +279,13 @@ def _train_category_pooled(
                 next_obs, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
                 next_mask = env.action_masks() if not done else np.ones(n_actions, dtype=bool)
+
+                # Collect raw transitions for per-SKU TL prefill (plain only)
+                if collect_transitions:
+                    transitions_by_product[product].append(
+                        (obs.copy(), action, reward, next_obs.copy(), done, next_mask.copy())
+                    )
+
                 agent.store_transition(obs, action, reward, next_obs, done, next_mask)
                 for _ in range(replay_ratio):
                     agent.train_step_fn()
@@ -288,6 +300,22 @@ def _train_category_pooled(
         model_path = os.path.join(cat_dir, f"pooled_{category}_{variant}_{step_hours}h.pt")
         agent.save(model_path)
         print(f"    [{variant}] Saved: {model_path}")
+
+        # Save per-product transitions after plain variant training
+        if collect_transitions and transitions_by_product:
+            trans_dir = os.path.join(cat_dir, "transitions")
+            os.makedirs(trans_dir, exist_ok=True)
+            for prod, trans_list in transitions_by_product.items():
+                states, actions, rewards, next_states, dones, masks = zip(*trans_list)
+                np.savez_compressed(os.path.join(trans_dir, f"{prod}.npz"),
+                    states=np.array(states, dtype=np.float32),
+                    actions=np.array(actions, dtype=np.int64),
+                    rewards=np.array(rewards, dtype=np.float32),
+                    next_states=np.array(next_states, dtype=np.float32),
+                    dones=np.array(dones, dtype=bool),
+                    masks=np.array(masks, dtype=bool),
+                )
+            print(f"    [plain] Saved transitions for {len(transitions_by_product)} products to {trans_dir}")
 
         if variant == "plain":
             agent_plain = agent
@@ -401,6 +429,7 @@ def _run_single_product(
     hold_action_prob: float = 0.0,
     pooled_tl_plain_path: str = None,
     pooled_tl_shaped_path: str = None,
+    prefill_transitions_path: str = None,
     augment_state: bool = False,
     tau_start: float = 0.005,
     tau_end: float = 0.005,
@@ -415,7 +444,6 @@ def _run_single_product(
     from scripts.train import train
     from scripts.evaluate import evaluate_policy
     from fresh_rl.environment import MarkdownProductEnv
-    from fresh_rl.dqn_agent import DQNAgent
     from fresh_rl.baselines import get_all_baselines
 
     product_dir = os.path.join(save_dir, product)
@@ -458,6 +486,7 @@ def _run_single_product(
         tl_epsilon_decay=tl_epsilon_decay,
         early_stop_patience=early_stop_patience,
         greedy_eval_n=eval_episodes,
+        prefill_transitions_path=prefill_transitions_path,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -475,33 +504,7 @@ def _run_single_product(
     }
 
     try:
-        # Train plain DQN
-        plain_pretrained = pooled_tl_plain_path or pretrained_path
-        agent_plain, hist_plain = train(
-            n_episodes=episodes,
-            product=product,
-            step_hours=step_hours,
-            reward_shaping=False,
-            seed=seed,
-            save_dir=product_dir,
-            pretrained_path=plain_pretrained,
-            **per_kwargs,
-        )
-
-        # Train shaped DQN
-        shaped_pretrained = pooled_tl_shaped_path or pretrained_path
-        agent_shaped, hist_shaped = train(
-            n_episodes=episodes,
-            product=product,
-            step_hours=step_hours,
-            reward_shaping=True,
-            seed=seed,
-            save_dir=product_dir,
-            pretrained_path=shaped_pretrained,
-            **per_kwargs,
-        )
-
-        # Evaluate both + baselines
+        # ── Step 1: Evaluate baselines BEFORE training ─────────────────────
         eval_env_kwargs = dict(product_name=product, step_hours=step_hours, seed=seed)
         if env_overrides:
             eval_env_kwargs.update(env_overrides)
@@ -509,14 +512,7 @@ def _run_single_product(
         if augment_state:
             from fresh_rl.pooled_env import AugmentedProductEnv
             env = AugmentedProductEnv(env, product, inventory_mult=inventory_mult)
-        state_dim = env.observation_space.shape[0]
         n_actions = env.action_space.n
-
-        # Set agents to greedy
-        agent_plain.epsilon = 0.0
-        agent_plain.name = "DQN Plain"
-        agent_shaped.epsilon = 0.0
-        agent_shaped.name = "DQN Shaped"
 
         baselines = get_all_baselines(n_actions=n_actions, seed=seed)
 
@@ -537,71 +533,109 @@ def _run_single_product(
             except Exception:
                 pass  # cache corrupt, re-evaluate
 
-        eval_results = {}
-        # Always evaluate DQN agents (weights change every run)
-        for policy in [agent_plain, agent_shaped]:
-            name = policy.name
-            er = evaluate_policy(env, policy, n_episodes=eval_episodes, seed=seed, is_dqn=True)
-            eval_results[name] = er
-
+        baseline_evals = {}
         if cached_baselines is not None:
-            eval_results.update(cached_baselines)
+            baseline_evals = cached_baselines
         else:
-            baseline_cache = {}
             for policy in baselines:
                 name = policy.name if hasattr(policy, "name") else str(policy)
                 er = evaluate_policy(env, policy, n_episodes=eval_episodes, seed=seed, is_dqn=False)
-                eval_results[name] = er
-                baseline_cache[name] = er
+                baseline_evals[name] = er
             # Save baseline cache
             try:
                 with open(cache_path, "w") as f:
-                    json.dump({"cache_key": cache_key, "baselines": baseline_cache}, f, indent=2, default=str)
+                    json.dump({"cache_key": cache_key, "baselines": baseline_evals}, f, indent=2, default=str)
             except Exception:
                 pass  # non-critical
 
-        # Extract key metrics
-        plain_r = eval_results["DQN Plain"]
-        shaped_r = eval_results["DQN Shaped"]
-
-        result["plain_reward"] = plain_r["mean_reward"]
-        result["plain_revenue"] = plain_r["mean_revenue"]
-        result["plain_waste"] = plain_r["mean_waste_rate"]
-        result["plain_clearance"] = plain_r["mean_clearance_rate"]
-
-        result["shaped_reward"] = shaped_r["mean_reward"]
-        result["shaped_revenue"] = shaped_r["mean_revenue"]
-        result["shaped_waste"] = shaped_r["mean_waste_rate"]
-        result["shaped_clearance"] = shaped_r["mean_clearance_rate"]
-
-        # Best baseline
-        baseline_names = [b.name for b in baselines]
-        baseline_evals = {k: v for k, v in eval_results.items() if k in baseline_names}
+        # Find best baseline policy object + metrics
         best_bl_name = max(baseline_evals, key=lambda k: baseline_evals[k]["mean_reward"])
         best_bl = baseline_evals[best_bl_name]
+        best_bl_policy = next(b for b in baselines if (b.name if hasattr(b, "name") else str(b)) == best_bl_name)
 
         result["best_baseline"] = best_bl_name
         result["best_baseline_reward"] = best_bl["mean_reward"]
         result["best_baseline_revenue"] = best_bl["mean_revenue"]
         result["best_baseline_waste"] = best_bl["mean_waste_rate"]
 
+        # ── Step 2: Train with per-episode baseline replay ─────────────────
+        plain_pretrained = pooled_tl_plain_path or pretrained_path
+        agent_plain, hist_plain = train(
+            n_episodes=episodes,
+            product=product,
+            step_hours=step_hours,
+            reward_shaping=False,
+            seed=seed,
+            save_dir=product_dir,
+            pretrained_path=plain_pretrained,
+            best_baseline=best_bl_policy,
+            **per_kwargs,
+        )
+
+        shaped_pretrained = pooled_tl_shaped_path or pretrained_path
+        agent_shaped, hist_shaped = train(
+            n_episodes=episodes,
+            product=product,
+            step_hours=step_hours,
+            reward_shaping=True,
+            seed=seed,
+            save_dir=product_dir,
+            pretrained_path=shaped_pretrained,
+            best_baseline=best_bl_policy,
+            **per_kwargs,
+        )
+
+        # ── Step 3: Extract daily comparison metrics (last-30-day rolling) ─
+        def _daily_metrics(hist):
+            ep_r = hist["episode_rewards"]
+            bl_r = hist["baseline_rewards"]
+            n = len(ep_r)
+            window = min(30, n)
+            last_ep = ep_r[-window:]
+            last_bl = bl_r[-window:]
+            wins = sum(1 for e, b in zip(last_ep, last_bl) if b is not None and e > b)
+            total = sum(1 for b in last_bl if b is not None)
+            win_rate = wins / total if total > 0 else 0
+            mean_reward = float(np.mean(last_ep))
+            mean_revenue = float(np.mean(hist["episode_revenues"][-window:]))
+            mean_waste = float(np.mean(hist["episode_wastes"][-window:]))
+            mean_clearance = float(np.mean(hist["episode_clearance"][-window:]))
+            return win_rate, mean_reward, mean_revenue, mean_waste, mean_clearance
+
+        plain_wr, plain_mean, plain_rev, plain_wst, plain_clr = _daily_metrics(hist_plain)
+        shaped_wr, shaped_mean, shaped_rev, shaped_wst, shaped_clr = _daily_metrics(hist_shaped)
+
+        result["plain_reward"] = plain_mean
+        result["plain_revenue"] = plain_rev
+        result["plain_waste"] = plain_wst
+        result["plain_clearance"] = plain_clr
+        result["plain_win_rate"] = plain_wr
+
+        result["shaped_reward"] = shaped_mean
+        result["shaped_revenue"] = shaped_rev
+        result["shaped_waste"] = shaped_wst
+        result["shaped_clearance"] = shaped_clr
+        result["shaped_win_rate"] = shaped_wr
+
         # Deltas
-        result["shaped_vs_plain_reward"] = shaped_r["mean_reward"] - plain_r["mean_reward"]
+        result["shaped_vs_plain_reward"] = shaped_mean - plain_mean
         result["shaped_vs_plain_revenue_pct"] = (
-            (shaped_r["mean_revenue"] - plain_r["mean_revenue"])
-            / max(abs(plain_r["mean_revenue"]), 0.01) * 100
+            (shaped_rev - plain_rev)
+            / max(abs(plain_rev), 0.01) * 100
         )
         result["shaped_vs_baseline_revenue_pct"] = (
-            (shaped_r["mean_revenue"] - best_bl["mean_revenue"])
+            (shaped_rev - best_bl["mean_revenue"])
             / max(abs(best_bl["mean_revenue"]), 0.01) * 100
         )
-        result["shaping_wins"] = shaped_r["mean_reward"] > plain_r["mean_reward"]
-        result["beats_baseline"] = shaped_r["mean_reward"] > best_bl["mean_reward"]
+        result["shaping_wins"] = shaped_mean > plain_mean
+        # Production-realistic: beats baseline if last-30-day win rate > 50%
+        result["beats_baseline"] = max(plain_wr, shaped_wr) > 0.5
+        result["best_win_rate"] = max(plain_wr, shaped_wr)
         result["status"] = "ok"
 
         # Save per-product eval
         with open(os.path.join(product_dir, "eval_summary.json"), "w") as f:
-            json.dump({**result, "eval_details": eval_results}, f, indent=2, default=str)
+            json.dump(result, f, indent=2, default=str)
 
     except Exception as e:
         result["status"] = "error"
@@ -1049,14 +1083,21 @@ def main():
     if args.pooled_tl:
         catalog = generate_catalog()
 
-        # Build per-product pooled model paths
+        # Build per-product pooled model paths and transition paths
         pooled_tl_paths = {}  # product -> (plain_path, shaped_path)
+        pooled_tl_trans = {}  # product -> transitions_path or None
         for p in products:
             cat = catalog[p].get("_category", "unknown")
             cat_dir = os.path.join(args.pooled_model_dir, f"_pooled_{cat}")
             plain_path = os.path.join(cat_dir, f"pooled_{cat}_plain_{args.step_hours}h.pt")
             shaped_path = os.path.join(cat_dir, f"pooled_{cat}_shaped_{args.step_hours}h.pt")
             pooled_tl_paths[p] = (plain_path, shaped_path)
+            trans_path = os.path.join(cat_dir, "transitions", f"{p}.npz")
+            pooled_tl_trans[p] = trans_path if os.path.exists(trans_path) else None
+
+        n_with_trans = sum(1 for v in pooled_tl_trans.values() if v is not None)
+        if n_with_trans > 0:
+            print(f"  Pooled transitions: found for {n_with_trans}/{len(products)} products")
 
         # Verify at least one model exists
         missing = [p for p, (pp, sp) in pooled_tl_paths.items()
@@ -1118,6 +1159,7 @@ def main():
                         _run_single_product, product=p,
                         pooled_tl_plain_path=pooled_tl_paths[p][0],
                         pooled_tl_shaped_path=pooled_tl_paths[p][1],
+                        prefill_transitions_path=pooled_tl_trans[p],
                         **tl_kwargs,
                     ): p
                     for p in products
@@ -1145,6 +1187,7 @@ def main():
                     product=p,
                     pooled_tl_plain_path=plain_path,
                     pooled_tl_shaped_path=shaped_path,
+                    prefill_transitions_path=pooled_tl_trans[p],
                     **tl_kwargs,
                 )
                 all_results.append(result)
