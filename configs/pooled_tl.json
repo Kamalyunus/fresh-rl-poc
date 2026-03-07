@@ -1,6 +1,6 @@
 {
   "mode": "pooled-tl",
-  "description": "2-phase pipeline: pooled weights -> per-SKU fine-tuning -> greedy deployment eval",
+  "description": "2-phase pipeline: pooled weights -> per-SKU fine-tuning -> deployment eval",
 
   "episodes": 365,
   "step_hours": 2,
@@ -37,7 +37,7 @@
   },
 
   "transfer_learning": {
-    "tl_epsilon_start": 0.10,
+    "tl_epsilon_start": 0.20,
     "tl_epsilon_decay": null,
     "tl_warmup_steps": 200
   }

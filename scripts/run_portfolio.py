@@ -480,9 +480,9 @@ def _run_single_product(
             tau_end=tau_end,
             tau_warmup_steps=tau_warmup_steps,
             tl_warmup_steps=0,  # No warmup (weights already tuned)
-            tl_epsilon_start=0.0,  # Greedy deployment (no exploration noise)
+            tl_epsilon_start=0.05,  # Production epsilon floor (allows continued learning)
             tl_epsilon_decay=tl_epsilon_decay,
-            epsilon_end=0.0,  # Allow epsilon to stay at 0 (no floor)
+            epsilon_end=0.05,  # Match production EPSILON_FLOOR
             greedy_eval_n=0,  # No greedy eval in deployment (already greedy)
             initial_buffer=best_agent.replay_buffer,  # Carry Phase 1 experience
         )
@@ -503,7 +503,7 @@ def _run_single_product(
         with open(os.path.join(product_dir, "eval_deployment.json"), "w") as f:
             json.dump({
                 "variant": best_variant,
-                "epsilon": 0.0,
+                "epsilon": 0.05,
                 "seed": seed + 10000,
                 "dqn_rewards": hist_deploy["episode_rewards"],
                 "baseline_rewards": hist_deploy["baseline_rewards"],

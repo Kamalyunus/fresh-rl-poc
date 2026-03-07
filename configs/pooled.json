@@ -9,7 +9,7 @@
   "dqn": {
     "hidden_dim": 128,
     "batch_size": 32,
-    "buffer_size": 50000,
+    "buffer_size": 100000,
     "n_step": 5,
     "epsilon_decay": 0.999,
     "shaping_ratio": 0.2,
