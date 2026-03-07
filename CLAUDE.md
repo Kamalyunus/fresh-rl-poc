@@ -6,10 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RL-based progressive markdown pricing for perishable products. Double DQN agents learn to price 150 SKUs across 7 categories on an ecommerce markdown channel, outperforming rule-based baselines on reward (revenue - waste).
 
-Three training modes:
-- **Pooled TL (v2.1)**: Pooled model weights as initialization for per-SKU fine-tuning, 14-dim state, **95% beats-baseline** — best overall
-- **Per-SKU (v1.4)**: 150 separate models, 10-dim state, 86% beats-baseline
-- **Pooled (v2)**: 7 category-level models, 14-dim state (10 base + 4 product features), 78% beats-baseline — zero-shot generalization to new SKUs
+Two training modes:
+- **Pooled TL (v2.1+)**: Pooled model weights as initialization for per-SKU fine-tuning, 14-dim state. v4.2 2-phase pipeline: 57% beats-baseline (production-realistic)
+- **Pooled (v2)**: 7 category-level models, 14-dim state (10 base + 4 product features), generates checkpoints for TL
 
 ## Common Commands
 
@@ -20,12 +19,6 @@ pip install -r requirements.txt
 # Train single product
 python scripts/train.py --product salmon_fillet --episodes 5000 --step-hours 2 \
     --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2 \
-    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
-
-# Run per-SKU portfolio (150 models)
-python scripts/run_portfolio.py --episodes 5000 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
 
 # Run pooled portfolio (7 category models)

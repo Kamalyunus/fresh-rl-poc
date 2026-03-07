@@ -1,16 +1,27 @@
 """
 Portfolio runner: train and evaluate DQN across all 150 catalog SKUs.
 
-Trains plain DQN and shaped DQN for each product, evaluates against 7 baselines,
-then produces aggregate analysis and comprehensive portfolio visualizations.
+Two modes:
+  --pooled      Train 7 category-level pooled models (generates checkpoints for TL)
+  --pooled-tl   2-phase pipeline: pooled weights → per-SKU fine-tuning → deployment eval
 
 Usage:
-    python scripts/run_portfolio.py --episodes 3000 --eval-episodes 100 \
-        --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
+    # Generate pooled category models
+    python scripts/run_portfolio.py --pooled --pooled-episodes-per-sku 5000 \
+        --eval-episodes 100 --step-hours 2 --per --prefill --warmup-steps 1000 \
         --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
-        --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
-    python scripts/run_portfolio.py --category meats --episodes 3000 --workers 4
-    python scripts/run_portfolio.py --products salmon_fillet --episodes 3000
+        --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 --workers 7
+
+    # Run 2-phase pooled TL pipeline (v4.2)
+    python scripts/run_portfolio.py --pooled-tl \
+        --pooled-model-dir results/portfolio_v40_365ep_pooled \
+        --episodes 365 --step-hours 2 --per --workers 16 \
+        --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
+        --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
+        --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 3000 \
+        --tl-epsilon-start 0.3 --tl-warmup-steps 200 --replay-ratio 1 \
+        --prefill --prefill-episodes 365 --warmup-steps 200 \
+        --save-dir results/portfolio_v42_2phase_eval
 """
 
 import sys
@@ -32,90 +43,6 @@ from fresh_rl.product_catalog import (
     get_profile,
     get_categories,
 )
-
-
-# ── Category pre-training (runs in worker process) ───────────────────────
-
-def _pretrain_category(
-    category,
-    products,
-    total_episodes,
-    step_hours,
-    seed,
-    save_dir,
-    use_per,
-    demand_mult,
-    inventory_mult,
-    epsilon_decay,
-    hidden_dim=64,
-    replay_ratio=1,
-    batch_size=32,
-    buffer_size=10000,
-    n_step=1,
-    hold_action_prob=0.0,
-):
-    """Pre-train one agent on all products in a category."""
-    from fresh_rl.environment import MarkdownProductEnv
-    from fresh_rl.dqn_agent import DQNAgent
-    from fresh_rl.product_catalog import generate_catalog
-
-    os.makedirs(save_dir, exist_ok=True)
-    catalog = generate_catalog()
-
-    # Get dims from first product
-    sample_env = MarkdownProductEnv(products[0], step_hours=step_hours, seed=seed)
-    state_dim = sample_env.observation_space.shape[0]
-    n_actions = sample_env.action_space.n
-
-    agent = DQNAgent(
-        state_dim=state_dim, n_actions=n_actions, hidden_dim=hidden_dim,
-        lr=5e-4, gamma=0.97, epsilon_start=1.0, epsilon_end=0.05,
-        epsilon_decay=epsilon_decay or 0.999,
-        buffer_size=buffer_size, batch_size=batch_size,
-        reward_shaping=False,  # no shaping during pre-training
-        seed=seed, use_per=use_per,
-        n_step=n_step,
-        hold_action_prob=hold_action_prob,
-    )
-
-    print(f"  [PRETRAIN] {category}: {len(products)} products, {total_episodes} episodes")
-
-    for ep in range(total_episodes):
-        product = products[ep % len(products)]
-        profile = catalog[product]
-
-        env_kwargs = dict(product_name=product, step_hours=step_hours, seed=seed + ep)
-        if demand_mult != 1.0:
-            env_kwargs["base_markdown_demand"] = round(
-                profile.get("base_markdown_demand", 5.0) * demand_mult, 1)
-        if inventory_mult != 1.0:
-            env_kwargs["initial_inventory"] = int(
-                profile.get("initial_inventory", 20) * inventory_mult)
-
-        env = MarkdownProductEnv(**env_kwargs)
-        obs, _ = env.reset()
-        done = False
-
-        while not done:
-            mask = env.action_masks()
-            action = agent.select_action(obs, action_mask=mask)
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            next_mask = env.action_masks() if not done else np.ones(n_actions, dtype=bool)
-            agent.store_transition(obs, action, reward, next_obs, done, next_mask)
-            for _ in range(replay_ratio):
-                agent.train_step_fn()
-            obs = next_obs
-
-        agent.decay_epsilon()
-
-        if (ep + 1) % 500 == 0:
-            print(f"    {category}: episode {ep+1}/{total_episodes}, eps={agent.epsilon:.3f}")
-
-    model_path = os.path.join(save_dir, f"pretrained_{category}_{step_hours}h.pt")
-    agent.save(model_path)
-    print(f"  [PRETRAIN] {category}: saved to {model_path}")
-    return model_path
 
 
 # ── Pooled category pipeline (runs in worker process) ─────────────────────
@@ -234,7 +161,6 @@ def _train_category_pooled(
 
     for variant, shaping in [("plain", False), ("shaped", True)]:
         # Compute initial waste_cost_scale from first product (will be updated per-episode)
-        first_profile = catalog[products[0]]
         first_env = env._envs[products[0]]
         revenue_scale = first_env.base_price * first_env.initial_inventory
         waste_cost_scale = shaping_ratio * revenue_scale if shaping else None
@@ -420,7 +346,6 @@ def _run_single_product(
     demand_mult: float = 1.0,
     inventory_mult: float = 1.0,
     epsilon_decay: float = None,
-    pretrained_path: str = None,
     hidden_dim: int = 64,
     replay_ratio: int = 1,
     batch_size: int = 32,
@@ -430,7 +355,6 @@ def _run_single_product(
     pooled_tl_plain_path: str = None,
     pooled_tl_shaped_path: str = None,
     prefill_transitions_path: str = None,
-    augment_state: bool = False,
     tau_start: float = 0.005,
     tau_end: float = 0.005,
     tau_warmup_steps: int = 0,
@@ -439,7 +363,12 @@ def _run_single_product(
     tl_epsilon_decay: float = None,
     early_stop_patience: int = None,
 ):
-    """Train plain + shaped DQN for one product, evaluate, return summary dict."""
+    """Train plain + shaped DQN for one product, evaluate, return summary dict.
+
+    2-phase pipeline (v4.2):
+      Phase 1: Train plain + shaped variants with per-episode baseline replay
+      Phase 2: Deploy best variant on fresh demand seeds with low epsilon
+    """
     # Imports inside worker to avoid pickling issues
     from scripts.train import train
     from scripts.evaluate import evaluate_policy
@@ -476,7 +405,7 @@ def _run_single_product(
         buffer_size=buffer_size,
         n_step=n_step,
         hold_action_prob=hold_action_prob,
-        augment_state=augment_state,
+        augment_state=True,
         inventory_mult=inventory_mult,
         tau_start=tau_start,
         tau_end=tau_end,
@@ -509,9 +438,8 @@ def _run_single_product(
         if env_overrides:
             eval_env_kwargs.update(env_overrides)
         env = MarkdownProductEnv(**eval_env_kwargs)
-        if augment_state:
-            from fresh_rl.pooled_env import AugmentedProductEnv
-            env = AugmentedProductEnv(env, product, inventory_mult=inventory_mult)
+        from fresh_rl.pooled_env import AugmentedProductEnv
+        env = AugmentedProductEnv(env, product, inventory_mult=inventory_mult)
         n_actions = env.action_space.n
 
         baselines = get_all_baselines(n_actions=n_actions, seed=seed)
@@ -560,7 +488,6 @@ def _run_single_product(
         result["best_baseline_waste"] = best_bl["mean_waste_rate"]
 
         # ── Step 2: Train with per-episode baseline replay ─────────────────
-        plain_pretrained = pooled_tl_plain_path or pretrained_path
         agent_plain, hist_plain = train(
             n_episodes=episodes,
             product=product,
@@ -568,12 +495,11 @@ def _run_single_product(
             reward_shaping=False,
             seed=seed,
             save_dir=product_dir,
-            pretrained_path=plain_pretrained,
+            pretrained_path=pooled_tl_plain_path,
             best_baseline=best_bl_policy,
             **per_kwargs,
         )
 
-        shaped_pretrained = pooled_tl_shaped_path or pretrained_path
         agent_shaped, hist_shaped = train(
             n_episodes=episodes,
             product=product,
@@ -581,7 +507,7 @@ def _run_single_product(
             reward_shaping=True,
             seed=seed,
             save_dir=product_dir,
-            pretrained_path=shaped_pretrained,
+            pretrained_path=pooled_tl_shaped_path,
             best_baseline=best_bl_policy,
             **per_kwargs,
         )
@@ -669,7 +595,7 @@ def _run_single_product(
             buffer_size=buffer_size,
             n_step=n_step,
             hold_action_prob=hold_action_prob,
-            augment_state=augment_state,
+            augment_state=True,
             inventory_mult=inventory_mult,
             tau_start=tau_start,
             tau_end=tau_end,
@@ -733,31 +659,36 @@ def print_aggregate_report(results: list):
         by_cat.setdefault(cat, []).append(r)
 
     # Header
-    total_wins = sum(1 for r in ok_results if r["shaping_wins"])
     total_beats = sum(1 for r in ok_results if r["beats_baseline"])
     total = len(ok_results)
+
+    # v4.2 fields: best_variant counts
+    has_variant = any("best_variant" in r for r in ok_results)
+    if has_variant:
+        plain_picks = sum(1 for r in ok_results if r.get("best_variant") == "plain")
+        shaped_picks = sum(1 for r in ok_results if r.get("best_variant") == "shaped")
+        avg_win_rate = np.mean([r.get("best_win_rate", 0) for r in ok_results]) * 100
 
     print(f"\n{'='*90}")
     print(f"  PORTFOLIO RESULTS — {total} SKUs")
     print(f"{'='*90}")
-    print(f"\n  Shaping wins on {total_wins}/{total} SKUs ({total_wins/total*100:.0f}%)")
     print(f"  Beats best baseline on {total_beats}/{total} SKUs ({total_beats/total*100:.0f}%)")
+    if has_variant:
+        print(f"  Best variant picks: plain={plain_picks}, shaped={shaped_picks}")
+        print(f"  Avg deployment win rate: {avg_win_rate:.0f}%")
 
-    print(f"\n  {'Category':<18} {'SKUs':>5} {'Win%':>6} {'Avg Rev Delta':>14} {'Avg Waste Delta':>16}")
-    print(f"  {'-'*62}")
+    print(f"\n  {'Category':<18} {'SKUs':>5} {'Beats%':>7} {'Avg WR':>7} {'Avg Deploy':>11}")
+    print(f"  {'-'*52}")
 
     for cat in sorted(by_cat.keys()):
         cat_results = by_cat[cat]
         n = len(cat_results)
-        wins = sum(1 for r in cat_results if r["shaping_wins"])
-        avg_rev = np.mean([r.get("shaped_vs_plain_revenue_pct", 0) for r in cat_results])
-        avg_waste = np.mean([
-            (r.get("plain_waste", 0) - r.get("shaped_waste", 0)) * 100
-            for r in cat_results
-        ])
+        beats = sum(1 for r in cat_results if r["beats_baseline"])
+        avg_wr = np.mean([r.get("best_win_rate", 0) for r in cat_results]) * 100
+        avg_deploy = np.mean([r.get("deploy_mean_reward", r.get("shaped_reward", 0)) for r in cat_results])
         print(
-            f"  {cat:<18} {n:>5} {wins/n*100:>5.0f}% "
-            f"{avg_rev:>+13.1f}% {avg_waste:>+15.1f}pp"
+            f"  {cat:<18} {n:>5} {beats/n*100:>6.0f}% "
+            f"{avg_wr:>6.0f}% {avg_deploy:>+10.1f}"
         )
 
     # Errors
@@ -795,6 +726,9 @@ def save_results(results: list, save_dir: str):
             "plain_waste", "shaped_waste",
             "best_baseline", "best_baseline_reward", "shaped_vs_baseline_revenue_pct",
             "shaping_wins", "beats_baseline",
+            "best_win_rate", "best_variant", "deploy_mean_reward",
+            "deploy_revenue", "deploy_waste", "deploy_clearance",
+            "plain_win_rate", "shaped_win_rate",
         ]
         with open(csv_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -805,113 +739,14 @@ def save_results(results: list, save_dir: str):
     print(f"  Saved: {json_path}")
 
 
-# ── Portfolio visualization ──────────────────────────────────────────────
-
-def plot_portfolio_summary(results: list, save_dir: str):
-    """Generate 4-panel portfolio summary plot."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    ok = [r for r in results if r["status"] == "ok"]
-    if len(ok) < 2:
-        print("  Skipping plot: need at least 2 successful results.")
-        return
-
-    categories = sorted(set(r["category"] for r in ok))
-    cmap = plt.colormaps.get_cmap("tab10").resampled(len(categories))
-    cat_colors = {cat: cmap(i) for i, cat in enumerate(categories)}
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle(
-        f"Portfolio Summary — {len(ok)} SKUs across {len(categories)} categories",
-        fontsize=16, fontweight="bold",
-    )
-
-    # Panel 1: Scatter — shaped vs plain reward
-    ax = axes[0, 0]
-    for r in ok:
-        ax.scatter(
-            r["plain_reward"], r["shaped_reward"],
-            c=[cat_colors[r["category"]]], s=40, alpha=0.7,
-            edgecolors="white", linewidth=0.5,
-        )
-    # Diagonal reference line
-    all_rewards = [r["plain_reward"] for r in ok] + [r["shaped_reward"] for r in ok]
-    lo, hi = min(all_rewards), max(all_rewards)
-    ax.plot([lo, hi], [lo, hi], "k--", alpha=0.3, linewidth=1)
-    ax.set_xlabel("Plain DQN Reward")
-    ax.set_ylabel("Shaped DQN Reward")
-    ax.set_title("Shaped vs Plain Reward per SKU")
-    # Legend
-    for cat in categories:
-        ax.scatter([], [], c=[cat_colors[cat]], label=cat, s=40)
-    ax.legend(fontsize=8, loc="lower right")
-    ax.grid(True, alpha=0.3)
-
-    # Panel 2: Histogram — shaped vs best baseline revenue improvement %
-    ax = axes[0, 1]
-    deltas = [r["shaped_vs_baseline_revenue_pct"] for r in ok]
-    ax.hist(deltas, bins=20, color="#2E86C1", edgecolor="white", alpha=0.8)
-    ax.axvline(0, color="red", linestyle="--", alpha=0.5)
-    ax.axvline(np.median(deltas), color="green", linestyle="--", alpha=0.7,
-               label=f"median={np.median(deltas):.1f}%")
-    ax.set_xlabel("Revenue Improvement vs Best Baseline (%)")
-    ax.set_ylabel("Count")
-    ax.set_title("Shaped DQN vs Best Baseline Revenue")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Panel 3: Bar — waste rate by category (plain vs shaped)
-    ax = axes[1, 0]
-    by_cat = {}
-    for r in ok:
-        by_cat.setdefault(r["category"], []).append(r)
-    cat_names = sorted(by_cat.keys())
-    x_pos = np.arange(len(cat_names))
-    width = 0.35
-    plain_wastes = [np.mean([r["plain_waste"] for r in by_cat[c]]) * 100 for c in cat_names]
-    shaped_wastes = [np.mean([r["shaped_waste"] for r in by_cat[c]]) * 100 for c in cat_names]
-    ax.bar(x_pos - width / 2, plain_wastes, width, label="Plain DQN", color="#E74C3C", alpha=0.7)
-    ax.bar(x_pos + width / 2, shaped_wastes, width, label="Shaped DQN", color="#27AE60", alpha=0.7)
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(cat_names, rotation=30, ha="right", fontsize=9)
-    ax.set_ylabel("Waste Rate (%)")
-    ax.set_title("Waste Rate by Category")
-    ax.legend(fontsize=9)
-    ax.grid(True, axis="y", alpha=0.3)
-
-    # Panel 4: Box plot — shaping reward delta by category
-    ax = axes[1, 1]
-    box_data = [
-        [r["shaped_vs_plain_reward"] for r in by_cat[c]]
-        for c in cat_names
-    ]
-    bp = ax.boxplot(box_data, tick_labels=cat_names, patch_artist=True)
-    for patch, cat in zip(bp["boxes"], cat_names):
-        patch.set_facecolor(cat_colors[cat])
-        patch.set_alpha(0.6)
-    ax.axhline(0, color="red", linestyle="--", alpha=0.5)
-    ax.set_ylabel("Shaping Reward Delta")
-    ax.set_title("Reward Improvement by Category")
-    ax.tick_params(axis="x", rotation=30)
-    ax.grid(True, axis="y", alpha=0.3)
-
-    plt.tight_layout()
-    path = os.path.join(save_dir, "portfolio_summary.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {path}")
-
-
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Portfolio runner: train/evaluate DQN across all catalog SKUs"
+        description="Portfolio runner: pooled category training or 2-phase pooled-TL pipeline"
     )
     parser.add_argument("--category", type=str, default=None,
-                        help="Filter to a single category (e.g., meats, legacy)")
+                        help="Filter to a single category (e.g., meats)")
     parser.add_argument("--products", nargs="+", default=None,
                         help="Explicit list of product names")
     parser.add_argument("--episodes", type=int, default=500,
@@ -975,25 +810,23 @@ def main():
     parser.add_argument("--early-stop-patience", type=int, default=None,
                         help="Stop training after this many episodes without greedy reward improvement (default: disabled)")
 
-    # Transfer learning
-    parser.add_argument("--transfer-learning", action="store_true",
-                        help="Pre-train per category, then fine-tune per SKU")
-    parser.add_argument("--pretrain-episodes", type=int, default=1500,
-                        help="Pre-training episodes per category (default: 1500)")
-
     # Pooled category training
     parser.add_argument("--pooled", action="store_true",
                         help="Train 7 category-level pooled models instead of 150 per-SKU models")
     parser.add_argument("--pooled-episodes-per-sku", type=int, default=2500,
                         help="Training episodes per SKU in pooled mode (default: 2500)")
 
-    # Pooled→per-SKU transfer learning (v2.1)
+    # Pooled→per-SKU transfer learning (v2.1+)
     parser.add_argument("--pooled-tl", action="store_true",
                         help="Use pooled category models as initialization for per-SKU fine-tuning")
     parser.add_argument("--pooled-model-dir", type=str, default="results/portfolio_v2_pooled",
                         help="Path to pooled results directory (default: results/portfolio_v2_pooled)")
 
     args = parser.parse_args()
+
+    # Require --pooled or --pooled-tl
+    if not args.pooled and not args.pooled_tl:
+        parser.error("Must specify --pooled or --pooled-tl mode")
 
     # Resolve mode-dependent defaults
     if args.replay_ratio is None:
@@ -1017,8 +850,8 @@ def main():
         products = get_product_names()
 
     # Resume: skip already-done products
+    done = []
     if args.resume:
-        done = []
         remaining = []
         for p in products:
             summary_path = os.path.join(args.save_dir, p, "eval_summary.json")
@@ -1051,8 +884,6 @@ def main():
         print(f"  Demand mult:    {args.demand_mult}x")
     if args.inventory_mult != 1.0:
         print(f"  Inventory mult: {args.inventory_mult}x")
-    if args.transfer_learning:
-        print(f"  Transfer learn: ON ({args.pretrain_episodes} pretrain episodes)")
     if args.pooled:
         print(f"  Pooled mode:    ON ({args.pooled_episodes_per_sku} eps/SKU)")
     if args.pooled_tl:
@@ -1142,7 +973,6 @@ def main():
 
         save_results(all_results, args.save_dir)
         print_aggregate_report(all_results)
-        plot_portfolio_summary(all_results, args.save_dir)
 
         portfolio_json = os.path.join(args.save_dir, "portfolio_results.json")
         if os.path.exists(portfolio_json):
@@ -1151,143 +981,35 @@ def main():
 
         return
 
-    # ── Pooled→per-SKU transfer learning mode (v2.1) ────────────────────
-    if args.pooled_tl:
-        catalog = generate_catalog()
+    # ── Pooled→per-SKU transfer learning mode (v2.1+) ────────────────────
+    catalog = generate_catalog()
 
-        # Build per-product pooled model paths and transition paths
-        pooled_tl_paths = {}  # product -> (plain_path, shaped_path)
-        pooled_tl_trans = {}  # product -> transitions_path or None
-        for p in products:
-            cat = catalog[p].get("_category", "unknown")
-            cat_dir = os.path.join(args.pooled_model_dir, f"_pooled_{cat}")
-            plain_path = os.path.join(cat_dir, f"pooled_{cat}_plain_{args.step_hours}h.pt")
-            shaped_path = os.path.join(cat_dir, f"pooled_{cat}_shaped_{args.step_hours}h.pt")
-            pooled_tl_paths[p] = (plain_path, shaped_path)
-            trans_path = os.path.join(cat_dir, "transitions", f"{p}.npz")
-            pooled_tl_trans[p] = trans_path if os.path.exists(trans_path) else None
+    # Build per-product pooled model paths and transition paths
+    pooled_tl_paths = {}  # product -> (plain_path, shaped_path)
+    pooled_tl_trans = {}  # product -> transitions_path or None
+    for p in products:
+        cat = catalog[p].get("_category", "unknown")
+        cat_dir = os.path.join(args.pooled_model_dir, f"_pooled_{cat}")
+        plain_path = os.path.join(cat_dir, f"pooled_{cat}_plain_{args.step_hours}h.pt")
+        shaped_path = os.path.join(cat_dir, f"pooled_{cat}_shaped_{args.step_hours}h.pt")
+        pooled_tl_paths[p] = (plain_path, shaped_path)
+        trans_path = os.path.join(cat_dir, "transitions", f"{p}.npz")
+        pooled_tl_trans[p] = trans_path if os.path.exists(trans_path) else None
 
-        n_with_trans = sum(1 for v in pooled_tl_trans.values() if v is not None)
-        if n_with_trans > 0:
-            print(f"  Pooled transitions: found for {n_with_trans}/{len(products)} products")
+    n_with_trans = sum(1 for v in pooled_tl_trans.values() if v is not None)
+    if n_with_trans > 0:
+        print(f"  Pooled transitions: found for {n_with_trans}/{len(products)} products")
 
-        # Verify at least one model exists
-        missing = [p for p, (pp, sp) in pooled_tl_paths.items()
-                   if not os.path.exists(pp) and not os.path.exists(sp)]
-        if missing:
-            cats_missing = sorted(set(catalog[p].get("_category", "unknown") for p in missing))
-            print(f"  WARNING: Missing pooled models for {len(missing)} products "
-                  f"(categories: {cats_missing})")
-            print(f"  Looking in: {args.pooled_model_dir}")
+    # Verify at least one model exists
+    missing = [p for p, (pp, sp) in pooled_tl_paths.items()
+               if not os.path.exists(pp) and not os.path.exists(sp)]
+    if missing:
+        cats_missing = sorted(set(catalog[p].get("_category", "unknown") for p in missing))
+        print(f"  WARNING: Missing pooled models for {len(missing)} products "
+              f"(categories: {cats_missing})")
+        print(f"  Looking in: {args.pooled_model_dir}")
 
-        tl_kwargs = dict(
-            episodes=args.episodes,
-            eval_episodes=args.eval_episodes,
-            step_hours=args.step_hours,
-            seed=args.seed,
-            save_dir=args.save_dir,
-            shaping_ratio=args.shaping_ratio,
-            use_per=args.per,
-            prefill=args.prefill,
-            prefill_episodes=args.prefill_episodes,
-            warmup_steps=args.warmup_steps,
-            demand_mult=args.demand_mult,
-            inventory_mult=args.inventory_mult,
-            epsilon_decay=args.epsilon_decay,
-            hidden_dim=args.hidden_dim,
-            replay_ratio=args.replay_ratio,
-            batch_size=args.batch_size,
-            buffer_size=args.buffer_size,
-            n_step=args.n_step,
-            hold_action_prob=args.hold_action_prob,
-            augment_state=True,
-            tau_start=args.tau_start,
-            tau_end=args.tau_end,
-            tau_warmup_steps=args.tau_warmup_steps,
-            tl_warmup_steps=args.tl_warmup_steps,
-            tl_epsilon_start=args.tl_epsilon_start,
-            tl_epsilon_decay=args.tl_epsilon_decay,
-            early_stop_patience=args.early_stop_patience,
-        )
-
-        all_results = []
-        start_time = time.time()
-
-        # Load previously completed results for resume mode
-        if args.resume:
-            for p in done:
-                summary_path = os.path.join(args.save_dir, p, "eval_summary.json")
-                try:
-                    with open(summary_path) as f:
-                        data = json.load(f)
-                    all_results.append({k: v for k, v in data.items() if k != "eval_details"})
-                except Exception:
-                    pass
-
-        if args.workers > 1:
-            with ProcessPoolExecutor(max_workers=args.workers) as executor:
-                futures = {
-                    executor.submit(
-                        _run_single_product, product=p,
-                        pooled_tl_plain_path=pooled_tl_paths[p][0],
-                        pooled_tl_shaped_path=pooled_tl_paths[p][1],
-                        prefill_transitions_path=pooled_tl_trans[p],
-                        **tl_kwargs,
-                    ): p
-                    for p in products
-                }
-                for i, future in enumerate(as_completed(futures), 1):
-                    product = futures[future]
-                    try:
-                        result = future.result()
-                        all_results.append(result)
-                        status = "OK" if result["status"] == "ok" else "ERROR"
-                        win = "WIN" if result.get("beats_baseline") else "---"
-                        print(
-                            f"  [{i}/{len(products)}] {product:<30s} "
-                            f"{status}  {win}  "
-                            f"reward: {result.get('shaped_reward', 0):.1f}"
-                        )
-                    except Exception as e:
-                        all_results.append({"product": product, "status": "error", "error": str(e)})
-                        print(f"  [{i}/{len(products)}] {product:<30s} FAILED: {e}")
-        else:
-            for i, p in enumerate(products, 1):
-                print(f"\n  [{i}/{len(products)}] Running: {p}")
-                plain_path, shaped_path = pooled_tl_paths[p]
-                result = _run_single_product(
-                    product=p,
-                    pooled_tl_plain_path=plain_path,
-                    pooled_tl_shaped_path=shaped_path,
-                    prefill_transitions_path=pooled_tl_trans[p],
-                    **tl_kwargs,
-                )
-                all_results.append(result)
-
-                status = "OK" if result["status"] == "ok" else "ERROR"
-                win = "WIN" if result.get("beats_baseline") else "---"
-                print(
-                    f"  [{i}/{len(products)}] {p:<30s} "
-                    f"{status}  {win}  "
-                    f"reward: {result.get('shaped_reward', 0):.1f}"
-                )
-                save_results(all_results, args.save_dir)
-
-        elapsed = time.time() - start_time
-        print(f"\n  Total time: {elapsed/60:.1f} minutes")
-
-        save_results(all_results, args.save_dir)
-        print_aggregate_report(all_results)
-        plot_portfolio_summary(all_results, args.save_dir)
-
-        portfolio_json = os.path.join(args.save_dir, "portfolio_results.json")
-        if os.path.exists(portfolio_json):
-            from scripts.visualize import generate_portfolio_plots
-            generate_portfolio_plots(portfolio_json, save_dir=args.save_dir)
-
-        return
-
-    common_kwargs = dict(
+    tl_kwargs = dict(
         episodes=args.episodes,
         eval_episodes=args.eval_episodes,
         step_hours=args.step_hours,
@@ -1316,91 +1038,29 @@ def main():
         early_stop_patience=args.early_stop_patience,
     )
 
-    # ── Phase 1: Category pre-training (if transfer learning enabled) ────
-    pretrained_paths = {}  # product_name -> model_path
-    if args.transfer_learning:
-        catalog = generate_catalog()
-        categories_to_train = {}
-        for p in products:
-            cat = catalog[p].get("_category", "unknown")
-            categories_to_train.setdefault(cat, []).append(p)
-
-        pretrain_dir = os.path.join(args.save_dir, "_pretrained")
-
-        print(f"\n  Phase 1: Pre-training {len(categories_to_train)} categories "
-              f"({args.pretrain_episodes} episodes each)\n")
-
-        pretrain_kwargs = dict(
-            total_episodes=args.pretrain_episodes,
-            step_hours=args.step_hours,
-            seed=args.seed,
-            save_dir=pretrain_dir,
-            use_per=args.per,
-            demand_mult=args.demand_mult,
-            inventory_mult=args.inventory_mult,
-            epsilon_decay=args.epsilon_decay,
-            hidden_dim=args.hidden_dim,
-            replay_ratio=args.replay_ratio,
-            batch_size=args.batch_size,
-            buffer_size=args.buffer_size,
-            n_step=args.n_step,
-            hold_action_prob=args.hold_action_prob,
-        )
-
-        if args.workers > 1:
-            with ProcessPoolExecutor(
-                max_workers=min(args.workers, len(categories_to_train))
-            ) as executor:
-                futures = {
-                    executor.submit(
-                        _pretrain_category,
-                        category=cat,
-                        products=cat_products,
-                        **pretrain_kwargs,
-                    ): (cat, cat_products)
-                    for cat, cat_products in categories_to_train.items()
-                }
-                for future in as_completed(futures):
-                    cat, cat_products = futures[future]
-                    model_path = future.result()
-                    for p in cat_products:
-                        pretrained_paths[p] = model_path
-        else:
-            for cat, cat_products in categories_to_train.items():
-                model_path = _pretrain_category(
-                    category=cat,
-                    products=cat_products,
-                    **pretrain_kwargs,
-                )
-                for p in cat_products:
-                    pretrained_paths[p] = model_path
-
-        print(f"\n  Phase 1 complete. Pre-trained {len(categories_to_train)} category models.")
-        print(f"  Phase 2: Fine-tuning {len(products)} SKUs ({args.episodes} episodes each)\n")
-
     all_results = []
     start_time = time.time()
 
-    # Load previously completed results for aggregate report (resume mode)
+    # Load previously completed results for resume mode
     if args.resume:
         for p in done:
             summary_path = os.path.join(args.save_dir, p, "eval_summary.json")
             try:
                 with open(summary_path) as f:
                     data = json.load(f)
-                # Keep only the top-level keys we need
                 all_results.append({k: v for k, v in data.items() if k != "eval_details"})
             except Exception:
                 pass
 
     if args.workers > 1:
-        # Parallel execution
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             futures = {
                 executor.submit(
                     _run_single_product, product=p,
-                    pretrained_path=pretrained_paths.get(p),
-                    **common_kwargs,
+                    pooled_tl_plain_path=pooled_tl_paths[p][0],
+                    pooled_tl_shaped_path=pooled_tl_paths[p][1],
+                    prefill_transitions_path=pooled_tl_trans[p],
+                    **tl_kwargs,
                 ): p
                 for p in products
             }
@@ -1410,7 +1070,7 @@ def main():
                     result = future.result()
                     all_results.append(result)
                     status = "OK" if result["status"] == "ok" else "ERROR"
-                    win = "WIN" if result.get("shaping_wins") else "---"
+                    win = "WIN" if result.get("beats_baseline") else "---"
                     print(
                         f"  [{i}/{len(products)}] {product:<30s} "
                         f"{status}  {win}  "
@@ -1420,36 +1080,33 @@ def main():
                     all_results.append({"product": product, "status": "error", "error": str(e)})
                     print(f"  [{i}/{len(products)}] {product:<30s} FAILED: {e}")
     else:
-        # Sequential execution
         for i, p in enumerate(products, 1):
             print(f"\n  [{i}/{len(products)}] Running: {p}")
+            plain_path, shaped_path = pooled_tl_paths[p]
             result = _run_single_product(
                 product=p,
-                pretrained_path=pretrained_paths.get(p),
-                **common_kwargs,
+                pooled_tl_plain_path=plain_path,
+                pooled_tl_shaped_path=shaped_path,
+                prefill_transitions_path=pooled_tl_trans[p],
+                **tl_kwargs,
             )
             all_results.append(result)
 
             status = "OK" if result["status"] == "ok" else "ERROR"
-            win = "WIN" if result.get("shaping_wins") else "---"
+            win = "WIN" if result.get("beats_baseline") else "---"
             print(
                 f"  [{i}/{len(products)}] {p:<30s} "
                 f"{status}  {win}  "
                 f"reward: {result.get('shaped_reward', 0):.1f}"
             )
-
-            # Incremental save after each product
             save_results(all_results, args.save_dir)
 
     elapsed = time.time() - start_time
     print(f"\n  Total time: {elapsed/60:.1f} minutes")
 
-    # Final save + report + plots
     save_results(all_results, args.save_dir)
     print_aggregate_report(all_results)
-    plot_portfolio_summary(all_results, args.save_dir)
 
-    # Generate comprehensive portfolio visualizations
     portfolio_json = os.path.join(args.save_dir, "portfolio_results.json")
     if os.path.exists(portfolio_json):
         from scripts.visualize import generate_portfolio_plots

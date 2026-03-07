@@ -31,7 +31,6 @@ def train(
     prefill_episodes: int = 200,
     prefill_baselines: dict = None,
     warmup_steps: int = 0,
-    warmup_epsilon: float = None,
     shaping_ratio: float = 0.2,
     env_overrides: dict = None,
     epsilon_decay: float = None,
@@ -117,8 +116,6 @@ def train(
     elif prefill:
         print(f"  Pre-fill:          {prefill_episodes} episodes")
         print(f"  Warm-up steps:     {warmup_steps}")
-        if warmup_epsilon is not None:
-            print(f"  Warm-up epsilon:   {warmup_epsilon}")
     print(f"  Seed:              {seed}")
     if pretrained_path:
         print(f"  Pre-trained:       {os.path.basename(pretrained_path)}")
@@ -208,11 +205,6 @@ def train(
                 print(f"    Step {step+1:5d}/{warmup_steps} | Loss: {np.mean(recent):.4f}")
         if warmup_losses:
             print(f"  [WARM-UP] Final loss: {np.mean(warmup_losses[-100:]):.4f}\n")
-
-    # Set warm-start epsilon if specified
-    if warmup_epsilon is not None:
-        agent.epsilon = warmup_epsilon
-        print(f"  [WARM-START] Epsilon set to {warmup_epsilon}\n")
 
     # Training loop
     episode_rewards = []
@@ -432,8 +424,6 @@ if __name__ == "__main__":
                         help="Number of historical episodes for pre-fill")
     parser.add_argument("--warmup-steps", type=int, default=0,
                         help="Gradient steps on buffered data before online training")
-    parser.add_argument("--warmup-epsilon", type=float, default=None,
-                        help="Starting epsilon after warmup (default: use standard decay)")
     parser.add_argument("--shaping-ratio", type=float, default=0.2,
                         help="Shaping strength relative to revenue scale (default: 0.2)")
 
@@ -477,7 +467,6 @@ if __name__ == "__main__":
         prefill=args.prefill,
         prefill_episodes=args.prefill_episodes,
         warmup_steps=args.warmup_steps,
-        warmup_epsilon=args.warmup_epsilon,
         shaping_ratio=args.shaping_ratio,
         tau_start=args.tau_start,
         tau_end=args.tau_end,
