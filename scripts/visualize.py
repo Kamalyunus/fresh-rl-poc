@@ -1401,18 +1401,38 @@ def plot_portfolio_training_progress(ok_results, portfolio_dir, save_dir):
 
 
 def _load_daily_rewards(portfolio_dir, results):
-    """Load per-episode training rewards from training history files.
+    """Load Phase 2 deployment rewards from eval_deployment.json files.
 
-    Returns dict with keys 'plain', 'shaped', 'plain_baseline', 'shaped_baseline',
-    each mapping product name to a list of daily rewards (one per episode/day).
-    Baseline rewards are from per-episode baseline replay (None entries if unavailable).
+    Returns dict mapping product name to {"dqn": [...], "baseline": [...]}.
+    Each product has a single DQN array and a single baseline array (no cherry-picking).
+    Falls back to training history files if eval_deployment.json is not found.
     """
-    daily = {"plain": {}, "shaped": {}, "plain_baseline": {}, "shaped_baseline": {}}
+    daily = {}
+    fallback_count = 0
     for r in results:
         product = r["product"]
         product_dir = os.path.join(portfolio_dir, product)
         if not os.path.isdir(product_dir):
             continue
+
+        # Primary: load from Phase 2 deployment file
+        deploy_path = os.path.join(product_dir, "eval_deployment.json")
+        if os.path.exists(deploy_path):
+            try:
+                with open(deploy_path) as f:
+                    deploy = json.load(f)
+                dqn_rewards = deploy.get("dqn_rewards", [])
+                bl_rewards = deploy.get("baseline_rewards", [])
+                if dqn_rewards and bl_rewards:
+                    daily[product] = {"dqn": dqn_rewards, "baseline": bl_rewards}
+                    continue
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Fallback: load from training history (legacy compatibility)
+        fallback_count += 1
+        best_variant_rewards = None
+        best_variant_bl = None
         for fname in os.listdir(product_dir):
             if not fname.startswith(f"training_history_{product}_"):
                 continue
@@ -1425,81 +1445,54 @@ def _load_daily_rewards(portfolio_dir, results):
             except (json.JSONDecodeError, OSError):
                 continue
             rewards = hist.get("episode_rewards", [])
-            if not rewards:
-                continue
-            variant = "shaped" if "_shaped" in fname else "plain"
-            daily[variant][product] = rewards
             bl_rewards = hist.get("baseline_rewards", [])
-            if bl_rewards:
-                daily[f"{variant}_baseline"][product] = bl_rewards
+            if rewards and bl_rewards:
+                if best_variant_rewards is None or len(rewards) > len(best_variant_rewards):
+                    best_variant_rewards = rewards
+                    best_variant_bl = bl_rewards
+        if best_variant_rewards:
+            daily[product] = {"dqn": best_variant_rewards, "baseline": best_variant_bl}
+
+    if fallback_count > 0 and daily:
+        has_deploy = len(daily) - fallback_count
+        if has_deploy > 0:
+            print(f"    ({has_deploy} from deployment, {fallback_count} from training history fallback)")
     return daily
 
 
 def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     """2x2 stakeholder-ready chart showing how quickly RL delivers value.
 
-    Uses actual daily training rewards (1 session per day, with exploration)
-    to show realistic production performance over time.
-
-    When per-episode baseline replay data is available (baseline_rewards in
-    training histories), uses paired daily comparisons. Otherwise falls back
-    to comparing against the fixed best_baseline_reward.
+    Uses Phase 2 deployment data: each product has a single deployed DQN
+    (selected during Phase 1) and a fixed baseline, both evaluated on the
+    same fresh demand seeds. No cherry-picking between variants.
     """
     daily = _load_daily_rewards(portfolio_dir, ok_results)
-    if not daily["plain"] and not daily["shaped"]:
-        print("  [SKIP] No training histories found for time-to-value plot.")
+    if not daily:
+        print("  [SKIP] No daily reward data found for time-to-value plot.")
         return
 
-    baseline_by_product = {r["product"]: r["best_baseline_reward"] for r in ok_results}
     category_by_product = {r["product"]: r["category"] for r in ok_results}
 
-    # Check if paired baseline data is available
-    has_paired = bool(daily["plain_baseline"] or daily["shaped_baseline"])
-
-    # Find products with data and max episode count
-    products_with_data = set()
-    for variant in ("plain", "shaped"):
-        products_with_data.update(daily[variant].keys())
-    max_days = max(
-        max((len(daily[v].get(p, [])) for p in products_with_data), default=0)
-        for v in ("plain", "shaped")
-    )
+    products_with_data = set(daily.keys())
+    max_days = max(len(daily[p]["dqn"]) for p in products_with_data)
     if max_days == 0:
         print("  [SKIP] No daily reward data found for time-to-value plot.")
         return
     days = np.arange(max_days)
 
-    # Per-product, per-day: best daily DQN reward and best daily baseline reward
-    best_daily = {}  # product -> array of best DQN rewards
-    best_daily_bl = {}  # product -> array of baseline rewards (paired or fixed)
+    # Per-product, per-day: DQN reward and baseline reward
+    best_daily = {}  # product -> array of DQN rewards
+    best_daily_bl = {}  # product -> array of baseline rewards
     for product in products_with_data:
-        plain_r = daily["plain"].get(product, [])
-        shaped_r = daily["shaped"].get(product, [])
-        plain_bl = daily["plain_baseline"].get(product, [])
-        shaped_bl = daily["shaped_baseline"].get(product, [])
-        n = max(len(plain_r), len(shaped_r))
-        best = np.full(n, np.nan)
+        dqn_r = daily[product]["dqn"]
+        bl_r = daily[product]["baseline"]
+        n = len(dqn_r)
+        best = np.array(dqn_r, dtype=float)
         bl_arr = np.full(n, np.nan)
-        fixed_bl = baseline_by_product.get(product)
-        for i in range(n):
-            # Best DQN reward across variants
-            dqn_vals = []
-            if i < len(plain_r):
-                dqn_vals.append(plain_r[i])
-            if i < len(shaped_r):
-                dqn_vals.append(shaped_r[i])
-            if dqn_vals:
-                best[i] = max(dqn_vals)
-            # Paired baseline reward (max across variants), or fixed fallback
-            bl_vals = []
-            if i < len(plain_bl) and plain_bl[i] is not None:
-                bl_vals.append(plain_bl[i])
-            if i < len(shaped_bl) and shaped_bl[i] is not None:
-                bl_vals.append(shaped_bl[i])
-            if bl_vals:
-                bl_arr[i] = max(bl_vals)
-            elif fixed_bl is not None:
-                bl_arr[i] = fixed_bl
+        for i in range(min(n, len(bl_r))):
+            if bl_r[i] is not None:
+                bl_arr[i] = bl_r[i]
         best_daily[product] = best
         best_daily_bl[product] = bl_arr
 
@@ -1563,8 +1556,7 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
     cat_colors = _get_category_colors(categories)
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    comparison_mode = "Paired Daily Comparison" if has_paired else "vs Fixed Baseline"
-    fig.suptitle(f"Time to Value — Actual Daily Performance ({comparison_mode})",
+    fig.suptitle("Time to Value — Phase 2 Deployment Performance",
                  fontsize=14, fontweight="bold")
 
     # Panel 1: % beating baseline over time (hero chart)
@@ -1701,55 +1693,32 @@ def plot_time_to_value(ok_results, portfolio_dir, save_dir):
 def plot_category_time_to_value(ok_results, portfolio_dir, save_dir):
     """Per-category time-to-value: % beating baseline and reward gap over days.
 
-    Uses actual daily training rewards (1 session/day with exploration).
-    When per-episode baseline replay data is available, uses paired comparisons.
+    Uses Phase 2 deployment data: single deployed DQN vs fixed baseline per product.
     Two panels per category row: win rate trend + reward gap trend.
     """
     daily = _load_daily_rewards(portfolio_dir, ok_results)
-    if not daily["plain"] and not daily["shaped"]:
-        print("  [SKIP] No training histories found for category time-to-value plot.")
+    if not daily:
+        print("  [SKIP] No daily reward data found for category time-to-value plot.")
         return
 
-    baseline_by = {r["product"]: r["best_baseline_reward"] for r in ok_results}
     category_by = {r["product"]: r["category"] for r in ok_results}
 
-    products_with_data = set()
-    for v in ("plain", "shaped"):
-        products_with_data.update(daily[v].keys())
+    products_with_data = set(daily.keys())
 
-    # Best daily DQN reward and baseline reward per product
+    # DQN reward and baseline reward per product
     best_daily = {}
     best_daily_bl = {}
     for p in products_with_data:
-        pr = daily["plain"].get(p, [])
-        sr = daily["shaped"].get(p, [])
-        pr_bl = daily["plain_baseline"].get(p, [])
-        sr_bl = daily["shaped_baseline"].get(p, [])
-        n = max(len(pr), len(sr))
-        best = []
+        dqn_r = daily[p]["dqn"]
+        bl_r = daily[p]["baseline"]
+        n = len(dqn_r)
+        best_daily[p] = dqn_r
         bl_arr = []
-        fixed_bl = baseline_by.get(p)
         for i in range(n):
-            # Best DQN
-            vals = []
-            if i < len(pr):
-                vals.append(pr[i])
-            if i < len(sr):
-                vals.append(sr[i])
-            best.append(max(vals) if vals else float("nan"))
-            # Paired baseline or fixed fallback
-            bl_vals = []
-            if i < len(pr_bl) and pr_bl[i] is not None:
-                bl_vals.append(pr_bl[i])
-            if i < len(sr_bl) and sr_bl[i] is not None:
-                bl_vals.append(sr_bl[i])
-            if bl_vals:
-                bl_arr.append(max(bl_vals))
-            elif fixed_bl is not None:
-                bl_arr.append(fixed_bl)
+            if i < len(bl_r) and bl_r[i] is not None:
+                bl_arr.append(bl_r[i])
             else:
                 bl_arr.append(float("nan"))
-        best_daily[p] = best
         best_daily_bl[p] = bl_arr
 
     max_days = max(len(v) for v in best_daily.values())
@@ -1759,7 +1728,7 @@ def plot_category_time_to_value(ok_results, portfolio_dir, save_dir):
 
     fig, axes = plt.subplots(len(categories), 2, figsize=(14, 3 * len(categories)),
                              sharex=True)
-    fig.suptitle("Time to Value by Category — Actual Daily Performance (1 session/day)",
+    fig.suptitle("Time to Value by Category — Phase 2 Deployment (1 session/day)",
                  fontsize=14, fontweight="bold", y=1.0)
 
     for row, cat in enumerate(categories):

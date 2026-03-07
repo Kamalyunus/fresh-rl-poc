@@ -243,7 +243,21 @@ Trains 14 models total (7 categories x 2 variants) instead of 300. Each model se
 - **Pooled**: Instant zero-shot policy for new SKUs, 21x fewer models, good performance (78%)
 - **Hybrid**: Use pooled model on day 1 of a new SKU, fine-tune per-SKU with pooled TL for peak performance
 
-See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (17 iterations) and learnings.
+### Production-Realistic Evaluation (v4.2 — 2-phase, 57%)
+
+Separates training from deployment to mirror production reality:
+- **Phase 1 (Historical)**: Train on 365 days of historical data, evaluate baselines on the same seeds, pick best DQN variant per SKU
+- **Phase 2 (Deployment)**: Deploy selected model on 365 days of fresh demand (epsilon=0.10), continue online learning. Same demand given to both DQN and baseline each day.
+
+| Metric | v4.2 (2-phase deploy) | v4.1 (daily eval) | v4.0 (greedy eval) |
+|--------|----------------------|-------------------|-------------------|
+| **Beats baseline** | **86/150 (57%)** | 58/150 (39%) | 124/150 (83%) |
+| Win rate > 40% | 124/150 (83%) | 85/150 (57%) | — |
+| Runtime | 17.9 min | 11.4 min | 10.3 min |
+
+The 57% represents what a business would experience after deploying trained models with low exploration noise.
+
+See [EXPERIMENTS.md](EXPERIMENTS.md) for the full iteration history (25 iterations) and learnings.
 
 ## References
 

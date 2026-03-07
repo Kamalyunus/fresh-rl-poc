@@ -51,18 +51,17 @@ python scripts/run_portfolio.py --pooled-tl \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
     --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000
 
-# Run production-realistic evaluation (v4.1, paired daily comparison)
+# Run 2-phase production-realistic evaluation (v4.2, 57% beats-baseline)
 python scripts/run_portfolio.py --pooled-tl \
     --pooled-model-dir results/portfolio_v40_365ep_pooled \
     --episodes 365 \
-    --step-hours 2 --per --prefill --prefill-episodes 365 \
-    --warmup-steps 200 --tl-warmup-steps 200 \
-    --workers 16 \
+    --step-hours 2 --per --workers 16 \
     --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
-    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000 \
-    --tl-epsilon-start 0.3 --replay-ratio 1 \
-    --save-dir results/portfolio_v41_production_eval
+    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 3000 \
+    --tl-epsilon-start 0.3 --tl-warmup-steps 200 --replay-ratio 1 \
+    --prefill --prefill-episodes 365 --warmup-steps 200 \
+    --save-dir results/portfolio_v42_2phase_eval
 
 # Visualize portfolio results
 python scripts/visualize.py --portfolio results/portfolio_v21_pooled_tl/portfolio_results.json
@@ -126,8 +125,8 @@ deployment/
 - **Pooled training**: `PooledCategoryEnv` holds one `MarkdownProductEnv` per SKU. `reset(options={"product": name})` switches active product. `__getattr__` delegates to active env so baselines work unchanged.
 - **Pooled TL (v2.1)**: `AugmentedProductEnv` wraps per-SKU env to append 4 product features (10->14 dim), matching pooled model input. Pooled weights transfer directly via `load_pretrained()` — no weight surgery needed.
 - **Evaluation (greedy)**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Used for baseline identification and pooled mode eval.
-- **Evaluation (production-realistic)**: `train()` accepts `best_baseline` param. Each episode uses deterministic seeding (`seed + ep`) and replays baseline on same seed. `baseline_rewards` tracked in training history. `beats_baseline` = last-30-day win rate > 50%. No post-training greedy eval.
-- **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either. v4.1+ results include `best_win_rate`, `plain_win_rate`, `shaped_win_rate`.
+- **Evaluation (2-phase, v4.2)**: Phase 1 (Historical) trains plain + shaped DQN on 365 episodes, evaluates baselines on the same seeds, picks best variant. Phase 2 (Deployment) loads best checkpoint, runs 365 fresh episodes (seed + 10000) with epsilon=0.10, online learning continues. `beats_baseline` = Phase 2 last-30-day win rate > 50%. Saves `eval_deployment.json` per product.
+- **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either. v4.2+ results include `best_win_rate`, `best_variant`, `deploy_mean_reward`.
 - **Model metrics**: `compute_avg_q()` and `mean_loss` tracked as proxy quality signals in production (no simulator). Written to `metrics.json` alongside checkpoints.
 - **Safety rollback**: Auto-reverts to `agent_prev.pt` when avg_q drops >30% or loss spikes >3x. Resets epsilon to 0.15 for re-exploration.
 - **Epsilon floor**: Production epsilon clamped to `EPSILON_FLOOR=0.05` to prevent over-exploitation.
@@ -150,7 +149,7 @@ deployment/
 
 - **DEPLOYMENT.md** — Production deployment guide: data requirements, state vector construction, historical prefill pipeline, online RL architecture, rollout phases, safety guardrails, monitoring, and maintenance.
 - **ARCHITECTURE.md** — Technical architecture deep-dive: MDP formulation, algorithms, data structures, training pipeline.
-- **EXPERIMENTS.md** — Full experiment log (24 iterations from v1.0 through v4.1, production hardening, time-to-value visualization, and production-realistic evaluation).
+- **EXPERIMENTS.md** — Full experiment log (25 iterations from v1.0 through v4.2, production hardening, time-to-value visualization, and 2-phase production-realistic evaluation).
 
 ## Results Directory Structure
 
@@ -174,6 +173,11 @@ results/portfolio_v40_365ep_pooled_tl/ — v4.0 TL results (83%, 365ep realistic
 results/portfolio_v41_production_eval/ — v4.1 TL results (39%, production-realistic daily eval)
   portfolio_results.json               — Includes per-episode baseline_rewards for paired comparison
   {product_name}/training_history_*.json — Contains baseline_rewards array
+
+results/portfolio_v42_2phase_eval/     — v4.2 TL results (57%, 2-phase production-realistic eval)
+  portfolio_results.json               — Includes best_variant, deploy_mean_reward
+  {product_name}/eval_deployment.json  — Phase 2 deployment DQN + baseline reward arrays
+  {product_name}/deploy/               — Phase 2 training files (agent, history)
 
 results/portfolio_v2_pooled/           — Pooled category models (v2, 78%)
   _pooled_{category}/                  — Category model checkpoints (.pt, used by TL)

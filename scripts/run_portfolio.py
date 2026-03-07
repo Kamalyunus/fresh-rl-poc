@@ -517,8 +517,9 @@ def _run_single_product(
         baselines = get_all_baselines(n_actions=n_actions, seed=seed)
 
         # Baseline caching: deterministic baselines can be cached across runs
+        # Phase 1: evaluate baselines on same seeds as training (not separate eval_episodes)
         cache_key = {
-            "seed": seed, "step_hours": step_hours, "eval_episodes": eval_episodes,
+            "seed": seed, "step_hours": step_hours, "eval_episodes": episodes,
             "demand_mult": demand_mult, "inventory_mult": inventory_mult,
         }
         cache_path = os.path.join(product_dir, "baseline_cache.json")
@@ -539,7 +540,7 @@ def _run_single_product(
         else:
             for policy in baselines:
                 name = policy.name if hasattr(policy, "name") else str(policy)
-                er = evaluate_policy(env, policy, n_episodes=eval_episodes, seed=seed, is_dqn=False)
+                er = evaluate_policy(env, policy, n_episodes=episodes, seed=seed, is_dqn=False)
                 baseline_evals[name] = er
             # Save baseline cache
             try:
@@ -585,7 +586,7 @@ def _run_single_product(
             **per_kwargs,
         )
 
-        # ── Step 3: Extract daily comparison metrics (last-30-day rolling) ─
+        # ── Step 3: Select best variant from Phase 1 training ─────────────
         def _daily_metrics(hist):
             ep_r = hist["episode_rewards"]
             bl_r = hist["baseline_rewards"]
@@ -628,10 +629,81 @@ def _run_single_product(
             / max(abs(best_bl["mean_revenue"]), 0.01) * 100
         )
         result["shaping_wins"] = shaped_mean > plain_mean
-        # Production-realistic: beats baseline if last-30-day win rate > 50%
-        result["beats_baseline"] = max(plain_wr, shaped_wr) > 0.5
-        result["best_win_rate"] = max(plain_wr, shaped_wr)
+
+        # Pick best variant by win rate for deployment
+        if shaped_wr >= plain_wr:
+            best_variant = "shaped"
+            best_suffix = f"{product}_{step_hours}h_per_shaped" if use_per else f"{product}_{step_hours}h_shaped"
+            deploy_shaping = True
+        else:
+            best_variant = "plain"
+            best_suffix = f"{product}_{step_hours}h_per" if use_per else f"{product}_{step_hours}h"
+            deploy_shaping = False
+
+        best_checkpoint = os.path.join(product_dir, f"best_greedy_{best_suffix}.pt")
+        # Fallback to final checkpoint if best_greedy doesn't exist
+        if not os.path.exists(best_checkpoint):
+            best_checkpoint = os.path.join(product_dir, f"agent_{best_suffix}.pt")
+
+        # ── Step 4: Phase 2 — Deployment with fresh demand ────────────
+        deploy_dir = os.path.join(product_dir, "deploy")
+        _, hist_deploy = train(
+            n_episodes=episodes,
+            product=product,
+            step_hours=step_hours,
+            reward_shaping=deploy_shaping,
+            seed=seed + 10000,  # Fresh demand seeds
+            save_dir=deploy_dir,
+            pretrained_path=best_checkpoint,
+            best_baseline=best_bl_policy,
+            use_per=use_per,
+            prefill=prefill,
+            prefill_episodes=prefill_episodes,
+            warmup_steps=0,  # No gradient warmup (weights already tuned)
+            shaping_ratio=shaping_ratio,
+            env_overrides=env_overrides if env_overrides else None,
+            epsilon_decay=epsilon_decay,
+            hidden_dim=hidden_dim,
+            replay_ratio=replay_ratio,
+            batch_size=batch_size,
+            buffer_size=buffer_size,
+            n_step=n_step,
+            hold_action_prob=hold_action_prob,
+            augment_state=augment_state,
+            inventory_mult=inventory_mult,
+            tau_start=tau_start,
+            tau_end=tau_end,
+            tau_warmup_steps=tau_warmup_steps,
+            tl_warmup_steps=0,  # No warmup (weights already tuned)
+            tl_epsilon_start=0.10,  # Deployment epsilon
+            tl_epsilon_decay=tl_epsilon_decay,
+            greedy_eval_n=eval_episodes,
+            prefill_transitions_path=prefill_transitions_path,
+        )
+
+        # ── Step 5: Derive final metrics from Phase 2 deployment ──────
+        deploy_wr, deploy_mean, deploy_rev, deploy_wst, deploy_clr = _daily_metrics(hist_deploy)
+
+        result["beats_baseline"] = deploy_wr > 0.5
+        result["best_win_rate"] = deploy_wr
+        result["best_variant"] = best_variant
+        result["deploy_mean_reward"] = deploy_mean
+        result["deploy_revenue"] = deploy_rev
+        result["deploy_waste"] = deploy_wst
+        result["deploy_clearance"] = deploy_clr
         result["status"] = "ok"
+
+        # Save deployment summary for visualization
+        with open(os.path.join(product_dir, "eval_deployment.json"), "w") as f:
+            json.dump({
+                "variant": best_variant,
+                "epsilon": 0.10,
+                "seed": seed + 10000,
+                "dqn_rewards": hist_deploy["episode_rewards"],
+                "baseline_rewards": hist_deploy["baseline_rewards"],
+                "win_rate": deploy_wr,
+                "mean_reward": deploy_mean,
+            }, f, indent=2)
 
         # Save per-product eval
         with open(os.path.join(product_dir, "eval_summary.json"), "w") as f:
