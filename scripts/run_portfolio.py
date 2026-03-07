@@ -567,9 +567,6 @@ def _run_single_product(
             deploy_shaping = False
 
         best_checkpoint = os.path.join(product_dir, f"best_greedy_{best_suffix}.pt")
-        # Fallback to final checkpoint if best_greedy doesn't exist
-        if not os.path.exists(best_checkpoint):
-            best_checkpoint = os.path.join(product_dir, f"agent_{best_suffix}.pt")
 
         # ── Step 4: Phase 2 — Deployment with fresh demand ────────────
         deploy_dir = os.path.join(product_dir, "deploy")

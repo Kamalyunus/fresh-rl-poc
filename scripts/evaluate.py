@@ -100,7 +100,7 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
     per_label = " + PER" if use_per else ""
 
     # Try loading DQN (no shaping)
-    agent_path = os.path.join(save_dir, f"best_agent_{suffix}.pt")
+    agent_path = os.path.join(save_dir, f"best_greedy_{suffix}.pt")
     if os.path.exists(agent_path):
         agent = DQNAgent(state_dim=state_dim, n_actions=n_actions, seed=seed)
         agent.load(agent_path)
@@ -109,7 +109,7 @@ def run_evaluation(product="salad_mix", step_hours=4, n_episodes=200, seed=42, s
         agent_variants.append(agent)
 
     # Try loading DQN (with shaping)
-    agent_path_shaped = os.path.join(save_dir, f"best_agent_{suffix}_shaped.pt")
+    agent_path_shaped = os.path.join(save_dir, f"best_greedy_{suffix}_shaped.pt")
     if os.path.exists(agent_path_shaped):
         agent_shaped = DQNAgent(state_dim=state_dim, n_actions=n_actions, reward_shaping=True, seed=seed)
         agent_shaped.load(agent_path_shaped)

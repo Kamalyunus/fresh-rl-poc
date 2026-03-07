@@ -302,7 +302,6 @@ def train(
 
         if total_reward > best_reward:
             best_reward = total_reward
-            agent.save(os.path.join(save_dir, f"best_agent_{suffix}.pt"))
 
         # Periodic greedy evaluation + logging
         if (ep + 1) % eval_freq == 0 or ep == 0:
@@ -347,14 +346,11 @@ def train(
                       f"Stopping at episode {ep+1}.")
                 break
 
-    # Reload best greedy checkpoint if it exists (early stop or normal completion)
+    # Reload best greedy checkpoint (early stop or normal completion)
     best_greedy_path = os.path.join(save_dir, f"best_greedy_{suffix}.pt")
     if os.path.exists(best_greedy_path):
         agent.load_pretrained(best_greedy_path)
-        agent.epsilon = 0.0  # Best model should be greedy
-
-    # Save final agent
-    agent.save(os.path.join(save_dir, f"final_agent_{suffix}.pt"))
+        agent.epsilon = 0.0
 
     # Save training history
     history = {
