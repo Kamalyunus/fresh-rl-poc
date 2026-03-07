@@ -414,7 +414,7 @@ def _run_single_product(
         tl_epsilon_start=tl_epsilon_start,
         tl_epsilon_decay=tl_epsilon_decay,
         early_stop_patience=early_stop_patience,
-        greedy_eval_n=eval_episodes,
+        greedy_eval_n=0,  # Use rolling win rate for checkpoint selection, not simulator greedy eval
         prefill_transitions_path=prefill_transitions_path,
     )
 
@@ -598,9 +598,10 @@ def _run_single_product(
             tau_end=tau_end,
             tau_warmup_steps=tau_warmup_steps,
             tl_warmup_steps=0,  # No warmup (weights already tuned)
-            tl_epsilon_start=0.10,  # Deployment epsilon
+            tl_epsilon_start=0.0,  # Greedy deployment (no exploration noise)
             tl_epsilon_decay=tl_epsilon_decay,
-            greedy_eval_n=eval_episodes,
+            epsilon_end=0.0,  # Allow epsilon to stay at 0 (no floor)
+            greedy_eval_n=0,  # No greedy eval in deployment (already greedy)
             prefill_transitions_path=prefill_transitions_path,
         )
 
@@ -620,7 +621,7 @@ def _run_single_product(
         with open(os.path.join(product_dir, "eval_deployment.json"), "w") as f:
             json.dump({
                 "variant": best_variant,
-                "epsilon": 0.10,
+                "epsilon": 0.0,
                 "seed": seed + 10000,
                 "dqn_rewards": hist_deploy["episode_rewards"],
                 "baseline_rewards": hist_deploy["baseline_rewards"],
@@ -736,12 +737,79 @@ def save_results(results: list, save_dir: str):
     print(f"  Saved: {json_path}")
 
 
+# ── Config loading ────────────────────────────────────────────────────────
+
+def _load_config(config_path: str) -> dict:
+    """Load JSON config file and flatten nested sections into argparse-compatible dict."""
+    with open(config_path) as f:
+        cfg = json.load(f)
+
+    flat = {}
+
+    # Mode
+    mode = cfg.get("mode", "")
+    if mode == "pooled":
+        flat["pooled"] = True
+    elif mode == "pooled-tl":
+        flat["pooled_tl"] = True
+
+    # Top-level scalars
+    for key in ("episodes", "eval_episodes", "step_hours", "seed", "workers",
+                "save_dir", "pooled_model_dir"):
+        if key in cfg:
+            flat[key] = cfg[key]
+
+    # Pooled-specific
+    if "episodes_per_sku" in cfg:
+        flat["pooled_episodes_per_sku"] = cfg["episodes_per_sku"]
+
+    # DQN section
+    for key, val in cfg.get("dqn", {}).items():
+        flat[key] = val
+
+    # PER section
+    per_cfg = cfg.get("per", {})
+    if per_cfg.get("enabled"):
+        flat["per"] = True
+    if per_cfg.get("prefill"):
+        flat["prefill"] = True
+    for key in ("prefill_episodes", "warmup_steps"):
+        if key in per_cfg:
+            flat[key] = per_cfg[key]
+
+    # Environment section
+    for key, val in cfg.get("environment", {}).items():
+        flat[key] = val
+
+    # Tau schedule section
+    for key, val in cfg.get("tau_schedule", {}).items():
+        flat[key] = val
+
+    # Transfer learning section
+    for key, val in cfg.get("transfer_learning", {}).items():
+        if val is not None:
+            flat[key] = val
+
+    return flat
+
+
+def _save_effective_config(args, save_dir: str):
+    """Save the effective configuration used for this run."""
+    os.makedirs(save_dir, exist_ok=True)
+    config = {k: v for k, v in vars(args).items() if v is not None}
+    path = os.path.join(save_dir, "effective_config.json")
+    with open(path, "w") as f:
+        json.dump(config, f, indent=2, default=str)
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description="Portfolio runner: pooled category training or 2-phase pooled-TL pipeline"
     )
+    parser.add_argument("--config", type=str, default=None,
+                        help="JSON config file (CLI args override config values)")
     parser.add_argument("--category", type=str, default=None,
                         help="Filter to a single category (e.g., meats)")
     parser.add_argument("--products", nargs="+", default=None,
@@ -819,6 +887,13 @@ def main():
     parser.add_argument("--pooled-model-dir", type=str, default="results/portfolio_v2_pooled",
                         help="Path to pooled results directory (default: results/portfolio_v2_pooled)")
 
+    # Two-pass parse: first get --config, then apply config as defaults
+    pre_args, _ = parser.parse_known_args()
+    if pre_args.config:
+        cfg_defaults = _load_config(pre_args.config)
+        parser.set_defaults(**cfg_defaults)
+        print(f"  Loaded config: {pre_args.config}")
+
     args = parser.parse_args()
 
     # Require --pooled or --pooled-tl
@@ -868,7 +943,8 @@ def main():
     print(f"  PORTFOLIO RUNNER — {len(products)} products")
     print(f"{'='*70}")
     print(f"  Episodes:       {args.episodes}")
-    print(f"  Eval episodes:  {args.eval_episodes}")
+    if args.pooled:
+        print(f"  Eval episodes:  {args.eval_episodes}")
     print(f"  Step hours:     {args.step_hours}h")
     print(f"  Shaping ratio:  {args.shaping_ratio}")
     print(f"  Hidden dim:     {args.hidden_dim}")
@@ -890,7 +966,12 @@ def main():
         print(f"  Early stopping: patience={args.early_stop_patience} episodes")
     print(f"  Workers:        {args.workers}")
     print(f"  Save dir:       {args.save_dir}")
+    if pre_args.config:
+        print(f"  Config file:    {pre_args.config}")
     print(f"{'='*70}\n")
+
+    # Save effective config for reproducibility
+    _save_effective_config(args, args.save_dir)
 
     # ── Pooled category training mode ─────────────────────────────────────
     if args.pooled:

@@ -20,8 +20,11 @@ from fresh_rl.baselines import get_all_baselines
 
 
 def evaluate_policy(env, policy, n_episodes=200, seed=42, is_dqn=False):
-    """Evaluate a policy over multiple episodes and return detailed metrics."""
-    rng = np.random.default_rng(seed)
+    """Evaluate a policy over multiple episodes and return detailed metrics.
+
+    Uses deterministic seeds (seed + ep) matching training episode seeding,
+    so evaluation replays the same demand scenarios seen during training.
+    """
     n_actions = env.action_space.n
     rewards = []
     revenues = []
@@ -33,7 +36,7 @@ def evaluate_policy(env, policy, n_episodes=200, seed=42, is_dqn=False):
     action_counts = np.zeros(n_actions)
 
     for ep in range(n_episodes):
-        obs, _ = env.reset(seed=int(rng.integers(0, 100000)))
+        obs, _ = env.reset(seed=seed + ep)
         total_reward = 0.0
         ep_actions = []
         done = False

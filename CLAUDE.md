@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 RL-based progressive markdown pricing for perishable products. Double DQN agents learn to price 150 SKUs across 7 categories on an ecommerce markdown channel, outperforming rule-based baselines on reward (revenue - waste).
 
 Two training modes:
-- **Pooled TL (v2.1+)**: Pooled model weights as initialization for per-SKU fine-tuning, 14-dim state. v4.2 2-phase pipeline: 57% beats-baseline (production-realistic)
+- **Pooled TL (v4.3)**: Pooled model weights as initialization for per-SKU fine-tuning, 14-dim state. 2-phase pipeline with greedy deployment.
 - **Pooled (v2)**: 7 category-level models, 14-dim state (10 base + 4 product features), generates checkpoints for TL
 
 ## Common Commands
@@ -16,45 +16,20 @@ Two training modes:
 # Install dependencies
 pip install -r requirements.txt
 
+# Run pooled category training (generates checkpoints for TL)
+python scripts/run_portfolio.py --config configs/pooled.json
+
+# Run 2-phase pooled TL pipeline (greedy deployment)
+python scripts/run_portfolio.py --config configs/pooled_tl.json
+
+# Override config values with CLI args
+python scripts/run_portfolio.py --config configs/pooled_tl.json \
+    --products salmon_fillet --episodes 10 --save-dir results/test
+
 # Train single product
 python scripts/train.py --product salmon_fillet --episodes 5000 --step-hours 2 \
     --reward-shaping --per --prefill --warmup-steps 1000 --shaping-ratio 0.2 \
     --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
-
-# Run pooled portfolio (7 category models)
-python scripts/run_portfolio.py --pooled --pooled-episodes-per-sku 5000 \
-    --eval-episodes 100 --step-hours 2 --per --prefill --warmup-steps 1000 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
-    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 --workers 7
-
-# Run pooled->per-SKU transfer learning (v2.1, 95% at 5000ep)
-python scripts/run_portfolio.py --pooled-tl \
-    --pooled-model-dir results/portfolio_v2_pooled \
-    --episodes 5000 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --warmup-steps 1000 --workers 16 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
-    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5
-
-# Run pooled TL with v3.0 tau schedule (94% at 3000ep, 49% faster)
-python scripts/run_portfolio.py --pooled-tl \
-    --pooled-model-dir results/portfolio_v2_pooled \
-    --episodes 3000 --eval-episodes 100 \
-    --step-hours 2 --per --prefill --workers 16 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
-    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
-    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 12000
-
-# Run 2-phase production-realistic evaluation (v4.2, 57% beats-baseline)
-python scripts/run_portfolio.py --pooled-tl \
-    --pooled-model-dir results/portfolio_v40_365ep_pooled \
-    --episodes 365 \
-    --step-hours 2 --per --workers 16 \
-    --demand-mult 0.5 --inventory-mult 2.0 --epsilon-decay 0.999 \
-    --hidden-dim 128 --n-step 5 --hold-action-prob 0.5 \
-    --tau-start 0.005 --tau-end 0.03 --tau-warmup-steps 3000 \
-    --tl-epsilon-start 0.3 --tl-warmup-steps 200 --replay-ratio 1 \
-    --prefill --prefill-episodes 365 --warmup-steps 200 \
-    --save-dir results/portfolio_v42_2phase_eval
 
 # Visualize portfolio results
 python scripts/visualize.py --portfolio results/portfolio_v21_pooled_tl/portfolio_results.json
@@ -94,11 +69,15 @@ fresh_rl/
   prioritized_replay.py — PER buffer with SumTree, save/load persistence
   sumtree.py            — SumTree data structure
 
+configs/
+  pooled.json           — Pooled category training config
+  pooled_tl.json        — 2-phase pooled-TL pipeline config
+
 scripts/
   train.py              — Single-product training loop
   evaluate.py           — evaluate_policy() for greedy rollouts
-  run_portfolio.py      — Portfolio runner (per-SKU, pooled, and pooled-TL modes)
-  visualize.py          — Single-product + portfolio visualizations (11 portfolio plots)
+  run_portfolio.py      — Portfolio runner (pooled and pooled-TL modes, --config support)
+  visualize.py          — Portfolio visualizations (11 plots)
 
 deployment/
   config.py             — Constants, DQN defaults, metrics/safety thresholds, ProductionConfig (path management)
@@ -118,7 +97,7 @@ deployment/
 - **Pooled training**: `PooledCategoryEnv` holds one `MarkdownProductEnv` per SKU. `reset(options={"product": name})` switches active product. `__getattr__` delegates to active env so baselines work unchanged.
 - **Pooled TL (v2.1)**: `AugmentedProductEnv` wraps per-SKU env to append 4 product features (10->14 dim), matching pooled model input. Pooled weights transfer directly via `load_pretrained()` — no weight surgery needed.
 - **Evaluation (greedy)**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Used for baseline identification and pooled mode eval.
-- **Evaluation (2-phase, v4.2)**: Phase 1 (Historical) trains plain + shaped DQN on 365 episodes, evaluates baselines on the same seeds, picks best variant. Phase 2 (Deployment) loads best checkpoint, runs 365 fresh episodes (seed + 10000) with epsilon=0.10, online learning continues. `beats_baseline` = Phase 2 last-30-day win rate > 50%. Saves `eval_deployment.json` per product.
+- **Evaluation (2-phase, v4.3)**: Phase 1 (Historical) trains plain + shaped DQN on 365 episodes, evaluates baselines on the same seeds, picks best variant by rolling win rate. Phase 2 (Deployment) loads best checkpoint, runs 365 fresh episodes (seed + 10000) with epsilon=0.0 (greedy). Checkpoint selection uses rolling win rate (production-realistic), not multi-episode greedy eval. `beats_baseline` = Phase 2 last-30-day win rate > 50%. Saves `eval_deployment.json` per product.
 - **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either. v4.2+ results include `best_win_rate`, `best_variant`, `deploy_mean_reward`.
 - **Model metrics**: `compute_avg_q()` and `mean_loss` tracked as proxy quality signals in production (no simulator). Written to `metrics.json` alongside checkpoints.
 - **Safety rollback**: Auto-reverts to `agent_prev.pt` when avg_q drops >30% or loss spikes >3x. Resets epsilon to 0.15 for re-exploration.
@@ -129,6 +108,7 @@ deployment/
 - **Baseline caching**: Deterministic baseline evaluations cached to `baseline_cache.json` per product (keyed by seed, step_hours, eval_episodes, demand/inventory mults). Skips 7 baseline evals on re-runs.
 - **Configurable TL epsilon**: `--tl-epsilon-start` and `--tl-epsilon-decay` override hardcoded TL exploration schedule. Defaults resolve based on mode (pooled-TL: 0.15/0.997, standard: 0.3/agent default).
 - **Adaptive replay ratio**: `--replay-ratio` defaults to 2 for pooled-TL mode, 1 otherwise. **Caution**: 2x replay ratio combined with aggressive epsilon schedule regressed performance in v3.1 (87% vs v3.0's 94%).
+- **Config files**: `configs/*.json` define experiment parameters. `--config` loads a JSON file as defaults; CLI args override. `effective_config.json` saved to results dir for reproducibility.
 
 ## Important Constraints
 

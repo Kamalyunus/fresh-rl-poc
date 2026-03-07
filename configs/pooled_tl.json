@@ -1,0 +1,43 @@
+{
+  "mode": "pooled-tl",
+  "description": "2-phase pipeline: pooled weights -> per-SKU fine-tuning -> greedy deployment eval",
+
+  "episodes": 365,
+  "save_dir": "results/pooled_tl",
+  "pooled_model_dir": "results/pooled",
+
+  "dqn": {
+    "hidden_dim": 128,
+    "batch_size": 32,
+    "buffer_size": 10000,
+    "n_step": 5,
+    "epsilon_decay": 0.999,
+    "shaping_ratio": 0.2,
+    "hold_action_prob": 0.5,
+    "replay_ratio": 1
+  },
+
+  "per": {
+    "enabled": true,
+    "prefill": true,
+    "prefill_episodes": 365,
+    "warmup_steps": 200
+  },
+
+  "environment": {
+    "demand_mult": 0.5,
+    "inventory_mult": 2.0
+  },
+
+  "tau_schedule": {
+    "tau_start": 0.005,
+    "tau_end": 0.03,
+    "tau_warmup_steps": 3000
+  },
+
+  "transfer_learning": {
+    "tl_epsilon_start": 0.10,
+    "tl_epsilon_decay": null,
+    "tl_warmup_steps": 200
+  }
+}

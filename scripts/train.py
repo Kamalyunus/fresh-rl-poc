@@ -49,6 +49,7 @@ def train(
     tl_warmup_steps: int = None,
     tl_epsilon_start: float = None,
     tl_epsilon_decay: float = None,
+    epsilon_end: float = 0.05,
     early_stop_patience: int = None,
     greedy_eval_n: int = 20,
     prefill_transitions_path: str = None,
@@ -131,7 +132,7 @@ def train(
         lr=5e-4,
         gamma=0.97,
         epsilon_start=1.0,
-        epsilon_end=0.05,
+        epsilon_end=epsilon_end,
         epsilon_decay=epsilon_decay,
         buffer_size=buffer_size,
         batch_size=batch_size,
@@ -149,7 +150,7 @@ def train(
     # Transfer learning: load pre-trained weights
     if pretrained_path:
         agent.load_pretrained(pretrained_path)
-        agent.epsilon = tl_epsilon_start if tl_epsilon_start is not None else 0.3
+        agent.epsilon = tl_epsilon_start if tl_epsilon_start is not None else 0.10
         if tl_epsilon_decay is not None:
             agent.epsilon_decay = tl_epsilon_decay
         print(f"  [TRANSFER] Loaded pre-trained weights from {os.path.basename(pretrained_path)}")
@@ -303,46 +304,61 @@ def train(
         if total_reward > best_reward:
             best_reward = total_reward
 
-        # Periodic greedy evaluation + logging
+        # Periodic evaluation + logging
         if (ep + 1) % eval_freq == 0 or ep == 0:
-            g_reward, g_revenue, g_waste, g_clear = _greedy_eval()
-            greedy_eval_episodes.append((ep, g_reward, g_revenue, g_waste, g_clear))
-
-            # Early stopping: track best greedy reward
-            if g_reward > best_greedy_reward:
-                best_greedy_reward = g_reward
-                greedy_no_improve_count = 0
-                agent.save(os.path.join(save_dir, f"best_greedy_{suffix}.pt"))
-            else:
-                greedy_no_improve_count += 1
-
             recent_rewards = episode_rewards[-50:]
             recent_revenue = episode_revenues[-50:]
             recent_waste = episode_wastes[-50:]
             recent_clear = episode_clearance[-50:]
+
+            # Checkpoint selection: rolling win rate (production-realistic)
             win_str = ""
+            current_wr = 0.0
             if best_baseline is not None:
                 recent_bl = baseline_rewards[-50:]
                 recent_ep = episode_rewards[-50:]
                 daily_wins = sum(1 for e, b in zip(recent_ep, recent_bl) if b is not None and e > b)
                 daily_total = sum(1 for b in recent_bl if b is not None)
                 if daily_total > 0:
-                    win_str = f" | Win%: {daily_wins/daily_total*100:.0f}%"
+                    current_wr = daily_wins / daily_total
+                    win_str = f" | Win%: {current_wr*100:.0f}%"
+                if current_wr > best_greedy_reward:  # reusing var as best_win_rate
+                    best_greedy_reward = current_wr
+                    greedy_no_improve_count = 0
+                    agent.save(os.path.join(save_dir, f"best_greedy_{suffix}.pt"))
+                else:
+                    greedy_no_improve_count += 1
+
+            # Greedy eval (optional, for monitoring only — not used for checkpoint selection)
+            g_str = ""
+            if eval_n > 0:
+                g_reward, g_revenue, g_waste, g_clear = _greedy_eval()
+                greedy_eval_episodes.append((ep, g_reward, g_revenue, g_waste, g_clear))
+                g_str = f" | Greedy: {g_reward:6.1f}"
+                # Fallback: if no baseline provided, use greedy eval for checkpoint
+                if best_baseline is None:
+                    if g_reward > best_greedy_reward:
+                        best_greedy_reward = g_reward
+                        greedy_no_improve_count = 0
+                        agent.save(os.path.join(save_dir, f"best_greedy_{suffix}.pt"))
+                    else:
+                        greedy_no_improve_count += 1
+
             print(
                 f"  Episode {ep+1:4d}/{n_episodes} | "
                 f"Reward: {np.mean(recent_rewards):8.1f} | "
                 f"Revenue: ${np.mean(recent_revenue):7.1f} | "
                 f"Waste: {np.mean(recent_waste)*100:5.1f}% | "
                 f"Clear: {np.mean(recent_clear)*100:5.1f}% | "
-                f"Eps: {agent.epsilon:.3f} | "
-                f"Greedy: {g_reward:6.1f}{win_str}"
+                f"Eps: {agent.epsilon:.3f}"
+                f"{g_str}{win_str}"
             )
 
             # Check early stopping condition
             if early_stop_patience is not None and greedy_no_improve_count * eval_freq >= early_stop_patience:
                 early_stopped = True
                 early_stop_episode = ep + 1
-                print(f"\n  [EARLY STOP] No greedy improvement for {early_stop_patience} episodes. "
+                print(f"\n  [EARLY STOP] No improvement for {early_stop_patience} episodes. "
                       f"Stopping at episode {ep+1}.")
                 break
 
@@ -392,7 +408,10 @@ def train(
 
     print(f"\n{'='*60}")
     print(f"  Training Complete!" + (f" (early stopped at ep {early_stop_episode})" if early_stopped else ""))
-    print(f"  Best greedy reward: {best_greedy_reward:.1f}")
+    if best_baseline is not None:
+        print(f"  Best win rate: {best_greedy_reward*100:.0f}%")
+    elif eval_n > 0:
+        print(f"  Best greedy reward: {best_greedy_reward:.1f}")
     print(f"  Best episode reward: {best_reward:.1f}")
     print(f"  Results saved to: {save_dir}/")
     print(f"{'='*60}")
