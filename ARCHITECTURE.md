@@ -68,9 +68,10 @@ Detailed technical documentation of the reinforcement learning system for perish
 |  +-------------------------------------------------------------------+
 |                                                                      |
 |  +-------------------------------------------------------------------+
-|  |                    Evaluation Phase                               |
-|  |  DQN (plain) vs DQN (shaped) vs 7 Baselines                     |
-|  |  -> greedy rollouts, aggregate metrics, comparison tables        |
+|  |                    Evaluation Phase (v4.2 2-phase)                |
+|  |  Phase 1: Train plain + shaped, per-episode baseline replay      |
+|  |  Phase 2: Deploy best variant on fresh seeds (epsilon=0.10)      |
+|  |  -> beats_baseline = last-30-day deployment win rate > 50%       |
 |  +-------------------------------------------------------------------+
 +----------------------------------------------------------------------+
 ```
@@ -125,7 +126,7 @@ Environment                Agent                     Replay Buffer
 
 The markdown pricing problem is modeled as a finite-horizon Markov Decision Process.
 
-### State Space (10-dimensional, normalized to [0,1])
+### State Space (10-dim base + 4 product features = 14-dim, normalized to [0,1])
 
 | Index | Feature | Formula / Normalization | Signal |
 |-------|---------|------------------------|--------|
@@ -144,7 +145,7 @@ The markdown pricing problem is modeled as a finite-horizon Markov Decision Proc
 
 All features are clipped to [0, 1] after normalization. This keeps the neural network's input distribution stable across products with vastly different absolute scales.
 
-**Pooled mode (14-dim)**: In pooled category training, 4 additional product features are appended: `price_norm`, `cost_frac_norm`, `inventory_norm`, `pack_size_norm`. These are static per product (constant within an episode) and enable a single model to learn product-conditional strategies. See [Pooled Category Training](#pooled-category-training).
+**Product features (indices 10-13)**: All training modes use 14-dim state. The 4 additional product features (`price_norm`, `cost_frac_norm`, `inventory_norm`, `pack_size_norm`) are appended by `AugmentedProductEnv` (per-SKU) or `PooledCategoryEnv` (pooled). These are static per product (constant within an episode) and enable models to learn product-conditional strategies. See [Pooled Category Training](#pooled-category-training).
 
 ### Action Space
 
@@ -206,7 +207,7 @@ env.reset()
   +-- Sample initial inventory: base +/- N(0, noise_std=2.0), min=1
   +-- Reset discount index to 0 (20%)
   +-- Reset step counter, sales history, and metrics
-  +-- Return initial observation (10-dim normalized vector)
+  +-- Return initial observation (14-dim normalized vector: 10 env + 4 product)
 ```
 
 The randomized start time and day create natural variation — the agent must learn policies that work across Monday mornings (low traffic) and Saturday evenings (peak traffic).
@@ -218,7 +219,7 @@ For each time step within the markdown window:
 ```
 Step t:
   |
-  +-- Agent observes state s_t = [hours_rem, inv_rem, disc_idx, tod_sin, tod_cos, dow_sin, dow_cos, velocity, sell_through, proj_clearance]
+  +-- Agent observes state s_t = [hours_rem, inv_rem, disc_idx, tod_sin, tod_cos, dow_sin, dow_cos, velocity, sell_through, proj_clearance, price_norm, cost_frac_norm, inv_norm, pack_size_norm]
   |
   +-- Agent gets action mask: [False, False, True, True, True, True]
   |     (e.g., if current_discount_idx=2, actions 0,1 are masked)
@@ -263,9 +264,12 @@ Episode complete:
   |
   +-- Decay epsilon: epsilon = max(epsilon_end, epsilon * epsilon_decay)
   +-- Record episode metrics: total_reward, revenue, waste_rate, clearance_rate
+  +-- Replay same episode seed with best baseline (if provided):
+  |     Record baseline reward for paired comparison
   +-- Periodic greedy evaluation (every 50 episodes):
-  |     Run 20 episodes with epsilon=0, record mean metrics
-  +-- Save best agent checkpoint (by total reward)
+  |     Run eval_n episodes with epsilon=0, record mean metrics
+  +-- Save best_greedy checkpoint (by greedy evaluation reward)
+  +-- [Optional] Early stopping if greedy reward hasn't improved for patience episodes
 ```
 
 ### Concrete Example: Salmon Fillet, 2h Mode
@@ -324,13 +328,13 @@ nn.Sequential(
 )
 ```
 
-Default `hidden_dim=128`, `state_dim=10` (per-SKU) or `state_dim=14` (pooled):
+Default `hidden_dim=128`, `state_dim=14` (10 env + 4 product features):
 
 ```
-Input (10-dim per-SKU / 14-dim pooled)
+Input (14-dim)
     |
     v
-[Linear: state_dim -> 128] -> [ReLU]    (Layer 1)
+[Linear: 14 -> 128] -> [ReLU]           (Layer 1)
     |
     v
 [Linear: 128 -> 128] -> [ReLU]          (Layer 2)
@@ -343,8 +347,7 @@ Q-values (11-dim for 2h mode)
 ```
 
 Total parameters (2h mode, hidden_dim=128):
-- Per-SKU (10-dim): `10*128 + 128 + 128*128 + 128 + 128*11 + 11 = 19,083`
-- Pooled (14-dim): `14*128 + 128 + 128*128 + 128 + 128*11 + 11 = 19,595`
+- `14*128 + 128 + 128*128 + 128 + 128*11 + 11 = 19,595`
 
 ### Kaiming Initialization
 
@@ -526,10 +529,10 @@ Sampling: uniform random (each transition equally likely)
 ```
 
 Each transition includes:
-- **State** (10-dim float32): the observation before the action
+- **State** (14-dim float32): the observation before the action
 - **Action** (int): the discount level selected
 - **Reward** (float): possibly shaped reward
-- **Next state** (10-dim float32): the observation after the action
+- **Next state** (14-dim float32): the observation after the action
 - **Done** (bool): whether the episode ended
 - **Next action mask** (n_actions bool): valid actions from next state
 
@@ -919,19 +922,32 @@ Without normalization, a fixed scale like `Phi=-5.0` would overwhelm the reward 
 
 A fresh DQN agent starts with random weights and an empty replay buffer. Early training is dominated by random exploration — the agent takes nonsensical actions, stores low-quality transitions, and learns slowly from noise.
 
-### Solution: Pre-fill with Baseline Demonstrations
+### Solution: Pre-fill with Demonstrations
 
-Before online training begins, we run baseline policies through the environment and store their transitions in the replay buffer:
+Before online training begins, we populate the replay buffer with transitions. Two sources:
+
+**1. Baseline rollouts** (default): Run baseline policies through the environment:
 
 ```
-Pre-fill Pipeline:
+Baseline Pre-fill Pipeline:
   1. Create environment with product profile
-  2. For 200 episodes:
+  2. For N episodes (default 200, or 365 for realistic budget):
        a. Sample a baseline policy (weighted random)
        b. Roll out the full episode
        c. Store all transitions in the agent's replay buffer
   3. If using reward shaping, transitions go through agent.store_transition()
      so the shaping function is applied consistently
+```
+
+**2. Pooled transitions** (pooled-TL mode): Load transitions saved during pooled training:
+
+```
+Pooled Transition Pre-fill:
+  1. Load .npz file from {pooled_model_dir}/_pooled_{category}/transitions/{product}.npz
+  2. Contains: states (14-dim), actions, rewards, next_states, dones, masks
+  3. Store all transitions with high initial priority (5.0) for PER
+  4. These are actual training trajectories from the pooled model, providing
+     higher quality demonstrations than baseline rollouts
 ```
 
 ### Baseline Mix
@@ -1136,31 +1152,31 @@ Output: trained agent (.pt), training history (.json)
 
 Pipeline:
   1. Create environment from product catalog profile
-  2. Create DQN agent (PyTorch) with configured hyperparameters
-  3. [Optional] Pre-fill buffer with 200 episodes of baseline data
-  4. [Optional] Run 1000 warmup gradient steps on buffered data
-  5. Online training loop (3000-5000 episodes):
-       a. Reset environment
+  2. [Optional] Wrap with AugmentedProductEnv for 14-dim state (pooled TL)
+  3. Create DQN agent (PyTorch) with configured hyperparameters
+  4. [Optional] Load pre-trained weights via load_pretrained()
+  5. [Optional] Pre-fill buffer (baseline rollouts or pooled transitions)
+  6. [Optional] Run warmup gradient steps on buffered data
+  7. Online training loop:
+       a. Reset environment (deterministic seed = base_seed + episode)
        b. Run episode (step loop with epsilon-greedy + action masking)
        c. Store transitions with reward shaping (if enabled)
-       d. Train on sampled mini-batches
-       e. Decay epsilon
-       f. Every 50 episodes: greedy evaluation (20 episodes, epsilon=0)
-       g. Save best agent checkpoint
-  6. Save final agent and training history (including losses + epsilon_decay)
+       d. Train on sampled mini-batches (replay_ratio gradient steps per env step)
+       e. [Optional] Replay same seed with best baseline for paired comparison
+       f. Decay epsilon
+       g. Every 50 episodes: greedy evaluation (eval_n episodes, epsilon=0)
+       h. Save best_greedy checkpoint (by greedy evaluation reward)
+       i. [Optional] Early stopping if greedy reward stagnates
+  8. Reload best_greedy checkpoint, save training history
 
 Evaluation (scripts/evaluate.py):
   -> Greedy rollouts, per-policy metrics, comparison table
 
-Visualization (scripts/visualize.py):
-  Single-product mode (--product):
-    -> Training curves, training dashboard, policy comparison bars,
-       action distributions, policy heatmap, episode walkthrough,
-       revenue-waste Pareto, discount progression
-  Portfolio mode (--portfolio):
-    -> 6-panel dashboard, DQN-vs-baseline scatter, category win rates,
-       reward gap distribution, per-SKU gap dots, baseline difficulty,
-       revenue-waste comparison, three-way DQN/shaped/baseline comparison
+Visualization (scripts/visualize.py --portfolio):
+  -> 11 portfolio plots: dashboard, three-way comparison,
+     DQN-vs-baseline scatter, category win rates, reward gap distribution,
+     per-SKU gap dots, baseline difficulty, revenue-waste comparison,
+     category heatmap, time-to-value, category time-to-value
 ```
 
 ### Key Hyperparameters
@@ -1177,10 +1193,15 @@ Visualization (scripts/visualize.py):
 | `batch_size` | 32 | Standard mini-batch size |
 | `n_step` | 1 (default), 5 (recommended) | N-step returns for faster credit assignment in short episodes |
 | `hold_action_prob` | 0.0 (default), 0.5 (recommended) | Fraction of exploration actions that hold current discount — corrects asymmetric exploration bias under progressive constraints |
-| `tau` | 0.005 | Soft target update rate |
+| `tau` | 0.005 (default) | Soft target update rate |
+| `tau_start` / `tau_end` | 0.005 / 0.03 | Tau schedule: linearly warms from start to end over tau_warmup_steps |
+| `tau_warmup_steps` | 0 (default), 3000 (recommended) | Steps for tau warmup (0 = constant tau) |
 | `PER alpha` | 0.6 | Moderate prioritization |
 | `PER beta` | 0.4 -> 1.0 | Anneal IS correction |
 | `shaping_ratio` | 0.2 | 20% of revenue scale |
+| `tl_epsilon_start` | 0.3 (default for pooled-TL) | Starting epsilon after loading pretrained weights |
+| `replay_ratio` | 1 | Gradient steps per environment step |
+| `early_stop_patience` | None (disabled) | Episodes without greedy improvement before stopping |
 
 ### Epsilon Schedule
 
@@ -1197,34 +1218,38 @@ epsilon_{t+1} = max(epsilon_end, epsilon_t * epsilon_decay)
 
 The recommended 2h mode uses `epsilon_decay=0.999` because the action space is large (11 actions) and the progressive constraint creates asymmetric exploration — the agent needs ample exploration to discover that holding at low discounts can be optimal.
 
-### Transfer Learning
+### Transfer Learning (Pooled TL)
 
-Two-phase training that pools category-level experience before specializing per SKU:
+Two-phase training that pools category-level experience before specializing per SKU. All modes use 14-dim state (10 env features + 4 product features via `AugmentedProductEnv`).
 
 ```
-Phase 1: Pre-train per category
+Pooled Training (--pooled):
   For each category (meats, seafood, ...):
-    1. Create one DQN agent (reward_shaping=False)
-    2. Train for N episodes, cycling through all products in the category
-       - Episode i trains on products[i % len(products)]
-       - Different seed per episode (seed + ep) for variety
-    3. Save model as pretrained_{category}_{step_hours}h.pt
+    1. Create PooledCategoryEnv (one env per SKU, 14-dim state)
+    2. Train plain DQN: N episodes round-robin across category SKUs
+    3. Save per-product transitions (.npz) for downstream TL prefill
+    4. Train shaped DQN: same round-robin, per-product waste_cost_scale
+    5. Save models: pooled_{category}_{variant}_{step_hours}h.pt
 
-Phase 2: Fine-tune per SKU
+Per-SKU Fine-Tuning (--pooled-tl, Phase 1):
   For each product:
-    1. Create fresh DQN agent
-    2. Load pre-trained category weights via load_pretrained()
+    1. Create DQN agent (14-dim state via AugmentedProductEnv)
+    2. Load pooled category weights via load_pretrained()
        - Copies q_network weights into both q_network and target_network
        - Ignores optimizer state, epsilon, training history
-    3. Set epsilon = 0.3 (lower starting exploration)
-    4. Train for M episodes (standard pipeline: both plain and shaped)
+    3. Set epsilon = tl_epsilon_start (default 0.3)
+    4. [Optional] Pre-fill from pooled transitions (.npz) or baseline rollouts
+    5. Train plain + shaped variants with per-episode baseline replay
+    6. Pick best variant by last-30-day training win rate
+
+Deployment Evaluation (--pooled-tl, Phase 2):
+  For each product:
+    1. Load best Phase 1 checkpoint
+    2. Run on fresh demand seeds (seed + 10000) with epsilon = 0.10
+    3. Online learning continues (gradient updates every step)
+    4. Per-episode baseline replay for paired comparison
+    5. beats_baseline = last-30-day deployment win rate > 50%
 ```
-
-**Experimental findings (v1.3)**: Old-style transfer learning (10-dim state, no product identity) was tested extensively (v1.3–v1.3.2) but **underperforms direct training**. With 3000 fine-tuning episodes, TL achieves 71% beats-baseline vs 81% without TL. The root cause is high intra-category SKU variance: category-level pre-training learns an overly generic policy that interferes with SKU-specific optimization (negative transfer).
-
-**Pooled TL (v2.1)**: Fixes the core failure by using pooled model weights (14-dim state with product features) as initialization. `AugmentedProductEnv` wraps per-SKU envs to produce 14-dim state matching pooled input, so `load_pretrained()` works directly — no weight surgery. Achieves **95% beats-baseline**, the best result. See [Pooled Category Training](#pooled-category-training).
-
-**Architecture compatibility**: For old TL (v1.3), all products share `state_dim=10`. For pooled TL (v2.1), `AugmentedProductEnv` produces `state_dim=14` matching the pooled model, so weights transfer directly.
 
 **`load_pretrained()` method** (`DQNAgent`):
 - Loads only `q_network` state dict from the saved checkpoint
@@ -1232,37 +1257,17 @@ Phase 2: Fine-tune per SKU
 - Does NOT restore optimizer state, epsilon, train_step, losses, or episode_rewards
 - The agent starts fresh for fine-tuning but with learned representations
 
+**Configurable TL exploration**: `--tl-epsilon-start` and `--tl-epsilon-decay` override the default TL exploration schedule. `--tl-warmup-steps` controls gradient warmup after weight loading (default 0 for TL — pretrained weights don't need full warmup).
+
 ---
 
 ## Portfolio Runner
 
 ### Purpose
 
-Validates that the RL approach generalizes across 150 products with diverse economics. Trains both plain and shaped DQN for each SKU, evaluates against all baselines, and produces aggregate analysis.
+Validates that the RL approach generalizes across 150 products with diverse economics. Two modes: `--pooled` generates category-level models, `--pooled-tl` runs the full 2-phase pipeline (pooled weights as initialization for per-SKU fine-tuning + deployment evaluation). One of the two modes must be specified.
 
 ### Architecture
-
-**Per-SKU Mode** (default):
-
-```
-scripts/run_portfolio.py
-  |
-  +-- Build product list from catalog (optionally filtered by --category)
-  |
-  +-- ProcessPoolExecutor (--workers 16)
-  |     |
-  |     +-- Worker 1: _run_single_product("salmon_fillet")
-  |     |     +-- Train plain DQN (5000 episodes, 10-dim state)
-  |     |     +-- Train shaped DQN (5000 episodes, 10-dim state)
-  |     |     +-- Evaluate both + 7 baselines (100 episodes each)
-  |     |     +-- Return summary dict
-  |     |
-  |     +-- Worker 2: _run_single_product("ground_beef_1lb")
-  |     +-- Worker 3: ...
-  |     +-- Worker N: ...
-  |
-  +-- Collect results + generate report + 9 portfolio plots
-```
 
 **Pooled Mode** (`--pooled`):
 
@@ -1276,15 +1281,45 @@ scripts/run_portfolio.py --pooled
   |     +-- Worker 1: _train_category_pooled("meats", [22 products])
   |     |     +-- Create PooledCategoryEnv (one env per SKU)
   |     |     +-- Prefill with multi-product baseline rollouts (14-dim)
-  |     |     +-- Train plain DQN (episodes = 5000 * 22, round-robin, 14-dim state)
-  |     |     +-- Train shaped DQN (per-product waste_cost_scale, 14-dim state)
+  |     |     +-- Train plain DQN (episodes = eps_per_sku * 22, round-robin, 14-dim)
+  |     |     +-- Save per-product transitions to .npz for TL prefill
+  |     |     +-- Train shaped DQN (per-product waste_cost_scale, 14-dim)
   |     |     +-- Evaluate each SKU vs 7 baselines
   |     |     +-- Return list of 22 result dicts
   |     |
   |     +-- Worker 2: _train_category_pooled("seafood", ...)
   |     +-- ... (7 workers total)
   |
-  +-- Collect results + generate report + 9 portfolio plots
+  +-- Collect results + generate report + 11 portfolio plots
+```
+
+**Pooled TL Mode** (`--pooled-tl`) — 2-phase pipeline (v4.2):
+
+```
+scripts/run_portfolio.py --pooled-tl --pooled-model-dir results/pooled
+  |
+  +-- Build product list, load pooled model paths per category
+  |
+  +-- ProcessPoolExecutor (--workers 16)
+  |     |
+  |     +-- Worker 1: _run_single_product("salmon_fillet")
+  |     |     +-- Step 1: Evaluate 7 baselines (on training seeds)
+  |     |     +-- Step 2 (Phase 1 — Historical Training):
+  |     |     |     +-- Train plain DQN (14-dim, pretrained from pooled)
+  |     |     |     +-- Train shaped DQN (14-dim, pretrained from pooled)
+  |     |     |     +-- Per-episode baseline replay on same seeds
+  |     |     +-- Step 3: Pick best variant by last-30-day training win rate
+  |     |     +-- Step 4 (Phase 2 — Deployment):
+  |     |     |     +-- Load best checkpoint, run on fresh demand seeds
+  |     |     |     +-- Epsilon = 0.10, online learning continues
+  |     |     |     +-- Per-episode baseline replay for paired comparison
+  |     |     +-- Step 5: beats_baseline = deployment win rate > 50%
+  |     |     +-- Save eval_deployment.json + eval_summary.json
+  |     |
+  |     +-- Worker 2: _run_single_product("ground_beef_1lb")
+  |     +-- ... (16 workers)
+  |
+  +-- Collect results + generate report + 11 portfolio plots
 ```
 
 ### Demand and Inventory Multipliers
@@ -1394,19 +1429,15 @@ Pack sizes are generated with a separate RNG (`seed + 10000`) to preserve existi
 
 ### Motivation
 
-Per-SKU training (v1.4) achieves 86% beats-baseline but requires 300 models (150 plain + 150 shaped). Each new SKU requires full training from scratch. Pooled category training addresses this by training a single model per category that generalizes across all ~22 SKUs, conditioned on observable product features. Pooled TL (v2.1) combines both: pooled weights as initialization for per-SKU fine-tuning, achieving 95% beats-baseline.
+Pooled category training trains a single model per category that generalizes across all ~22 SKUs, conditioned on observable product features. This serves two purposes: (1) zero-shot pricing for new SKUs with no training data, and (2) weight initialization for per-SKU fine-tuning via pooled TL.
 
-### Why It Works (and Why Transfer Learning Failed)
+### Why It Works
 
-Old transfer learning (v1.3) pre-trained on 10-dim state with **no product identity** — the model couldn't distinguish between different products during pre-training. It learned a blurred average policy that interfered with per-SKU fine-tuning (negative transfer: 71% vs 81%).
-
-Pooled training solves this by including 4 observable product features in every state (14-dim). The model explicitly knows which product it's pricing and can learn product-conditional strategies. Pooled TL (v2.1) then transfers these product-aware representations to per-SKU fine-tuning:
+Pooled training includes 4 observable product features in every state (14-dim). The model explicitly knows which product it's pricing and can learn product-conditional strategies. Pooled TL then transfers these product-aware representations to per-SKU fine-tuning:
 
 ```
-Per-SKU:    state = [10 env features]                        → 1 model per SKU (86%)
-Old TL:     state = [10 env features] (pretrain)             → 1 model per SKU (71%)
-Pooled:     state = [10 env features] + [4 product features] → 1 model per category (78%)
-Pooled TL:  state = [10 env features] + [4 product features] → 1 model per SKU (95%)
+Pooled:     state = [10 env features] + [4 product features] → 1 model per category
+Pooled TL:  state = [10 env features] + [4 product features] → 1 model per SKU
 ```
 
 ### PooledCategoryEnv
@@ -1449,12 +1480,19 @@ _train_category_pooled(category, products, episodes_per_sku, ...):
   |
   +-- Warmup: N gradient steps on buffered data
   |
-  +-- Training loop (total_episodes = episodes_per_sku * len(products)):
+  +-- Training loop (plain variant):
   |     Round-robin through products each episode:
   |       product = products[episode % len(products)]
   |       env.reset(options={"product": product})
-  |       [For shaped: agent.waste_cost_scale = shaping_ratio * revenue_scale]
   |       Run episode → store transitions (14-dim) → train
+  |       Collect per-product transitions for downstream TL prefill
+  |
+  +-- Save per-product transitions as .npz files:
+  |     {category_dir}/transitions/{product}.npz
+  |     Contains: states, actions, rewards, next_states, dones, masks
+  |
+  +-- Training loop (shaped variant):
+  |     Same round-robin, per-product waste_cost_scale adjustment
   |
   +-- Evaluation: for each product:
         env.reset(options={"product": product})
@@ -1502,12 +1540,11 @@ All steps within one episode are for the same product — the n-step accumulator
 
 ### Results Comparison
 
-| Approach | Models | Beats Baseline | Zero-Shot New SKUs |
-|----------|--------|---------------|-------------------|
-| **Pooled TL (v2.1)** | **300** | **95%** | No — requires fine-tuning |
-| Per-SKU (v1.4) | 300 | 86% | No — requires training |
-| Pooled (v2) | 14 | 78% | **Yes** — compute features, use category model |
-| Old TL (v1.3.2) | 300 | 71% | No — requires fine-tuning |
+| Approach | Models | Beats Baseline | Evaluation | Zero-Shot |
+|----------|--------|---------------|------------|-----------|
+| **Pooled TL** (5000ep, greedy eval) | 300 | **95%** | 100-ep greedy rollout | No |
+| **Pooled TL** (365ep, 2-phase v4.2) | 300 | **61%** | Deployment win rate > 50% | No |
+| Pooled (365ep) | 14 | 53% | Greedy eval | **Yes** |
 
 ---
 
