@@ -441,14 +441,17 @@ def _run_single_product(
             best_variant = "shaped"
             best_suffix = f"{product}_{step_hours}h_per_shaped" if use_per else f"{product}_{step_hours}h_shaped"
             deploy_shaping = True
+            best_agent = agent_shaped
         else:
             best_variant = "plain"
             best_suffix = f"{product}_{step_hours}h_per" if use_per else f"{product}_{step_hours}h"
             deploy_shaping = False
+            best_agent = agent_plain
 
         best_checkpoint = os.path.join(product_dir, f"best_greedy_{best_suffix}.pt")
 
         # ── Step 4: Phase 2 — Deployment with fresh demand ────────────
+        # Carry forward Phase 1 buffer (production-realistic: agent keeps its experience)
         deploy_dir = os.path.join(product_dir, "deploy")
         _, hist_deploy = train(
             n_episodes=episodes,
@@ -460,8 +463,7 @@ def _run_single_product(
             pretrained_path=best_checkpoint,
             best_baseline=best_bl_policy,
             use_per=use_per,
-            prefill=prefill,
-            prefill_episodes=prefill_episodes,
+            prefill=False,  # No synthetic prefill — buffer carried from Phase 1
             warmup_steps=0,  # No gradient warmup (weights already tuned)
             shaping_ratio=shaping_ratio,
             env_overrides=env_overrides if env_overrides else None,
@@ -482,7 +484,7 @@ def _run_single_product(
             tl_epsilon_decay=tl_epsilon_decay,
             epsilon_end=0.0,  # Allow epsilon to stay at 0 (no floor)
             greedy_eval_n=0,  # No greedy eval in deployment (already greedy)
-            prefill_transitions_path=prefill_transitions_path,
+            initial_buffer=best_agent.replay_buffer,  # Carry Phase 1 experience
         )
 
         # ── Step 5: Derive final metrics from Phase 2 deployment ──────

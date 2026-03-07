@@ -54,6 +54,7 @@ def train(
     greedy_eval_n: int = 20,
     prefill_transitions_path: str = None,
     best_baseline=None,
+    initial_buffer=None,
 ):
     """Train a DQN agent and save results."""
 
@@ -160,8 +161,14 @@ def train(
         warmup_steps = tl_warmup_steps if tl_warmup_steps is not None else 0
         print(f"  [TRANSFER] Warmup steps adjusted: {original_warmup} → {warmup_steps}\n")
 
-    # Pre-fill phase: load historical data into replay buffer
-    if prefill_transitions_path and os.path.exists(prefill_transitions_path):
+    # Buffer initialization: carry forward from previous phase, or prefill from scratch
+    if initial_buffer is not None:
+        agent.replay_buffer = initial_buffer
+        # Update n-step accumulator's buffer reference
+        if hasattr(agent, '_nstep'):
+            agent._nstep.buffer = initial_buffer
+        print(f"  [BUFFER] Carried forward {len(initial_buffer)} transitions from Phase 1\n")
+    elif prefill_transitions_path and os.path.exists(prefill_transitions_path):
         data = np.load(prefill_transitions_path)
         has_per = hasattr(agent.replay_buffer, 'max_priority')
         if has_per:

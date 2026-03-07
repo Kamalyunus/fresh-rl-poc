@@ -3,6 +3,7 @@
   "description": "2-phase pipeline: pooled weights -> per-SKU fine-tuning -> greedy deployment eval",
 
   "episodes": 365,
+  "step_hours": 2,
   "save_dir": "results/pooled_tl",
   "pooled_model_dir": "results/pooled",
 
