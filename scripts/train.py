@@ -55,6 +55,7 @@ def train(
     prefill_transitions_path: str = None,
     best_baseline=None,
     initial_buffer=None,
+    offline_steps: int = 0,
 ):
     """Train a DQN agent and save results."""
 
@@ -112,6 +113,8 @@ def train(
     print(f"  PER:               {use_per}")
     if tau_warmup_steps > 0:
         print(f"  Tau schedule:      {tau_start} → {tau_end} over {tau_warmup_steps} steps")
+    if offline_steps != 0:
+        print(f"  Offline steps:     {'auto' if offline_steps == -1 else offline_steps}")
     if prefill_transitions_path and os.path.exists(prefill_transitions_path):
         print(f"  Pre-fill:          from pooled transitions")
         print(f"  Warm-up steps:     {warmup_steps}")
@@ -184,7 +187,7 @@ def train(
         print(f"  [PRE-FILL] Loaded {len(data['actions'])} transitions from pooled training\n")
     elif prefill:
         from fresh_rl.historical_data import HistoricalDataGenerator
-        print("  [PRE-FILL] Generating historical data...")
+        print("  [PRE-FILL] Generating baseline historical data...")
         generator = HistoricalDataGenerator(
             product=product,
             step_hours=step_hours,
@@ -214,7 +217,70 @@ def train(
         if warmup_losses:
             print(f"  [WARM-UP] Final loss: {np.mean(warmup_losses[-100:]):.4f}\n")
 
-    # Training loop
+    # ── Offline training mode ───────────────────────────────────────────────
+    # Auto-compute offline steps from buffer size when -1
+    if offline_steps == -1:
+        offline_steps = len(agent.replay_buffer)
+
+    if offline_steps > 0:
+        print(f"\n  {'='*50}")
+        print(f"  [OFFLINE] Running {offline_steps} gradient steps")
+        print(f"  [OFFLINE] Buffer size: {len(agent.replay_buffer)} transitions")
+        print(f"  {'='*50}\n")
+
+        offline_losses = []
+        for step in range(offline_steps):
+            loss = agent.train_step_fn()
+            if loss is not None:
+                offline_losses.append(loss)
+            if (step + 1) % 1000 == 0 and offline_losses:
+                recent = offline_losses[-1000:]
+                print(f"    Step {step+1:6d}/{offline_steps} | Loss: {np.mean(recent):.4f}")
+
+        if offline_losses:
+            print(f"\n  [OFFLINE] Final loss: {np.mean(offline_losses[-200:]):.4f}")
+
+        # Save checkpoint
+        suffix = f"{product}_{step_hours}h"
+        if use_per:
+            suffix += "_per"
+        if reward_shaping:
+            suffix += "_shaped"
+        agent.save(os.path.join(save_dir, f"best_greedy_{suffix}.pt"))
+
+        # Return minimal history
+        history = {
+            "product": product,
+            "step_hours": step_hours,
+            "n_actions": int(n_actions),
+            "discount_levels": env.DISCOUNT_LEVELS.tolist(),
+            "n_episodes": 0,
+            "offline_steps": offline_steps,
+            "reward_shaping": reward_shaping,
+            "shaping_ratio": shaping_ratio,
+            "use_per": use_per,
+            "seed": seed,
+            "episode_rewards": [],
+            "episode_revenues": [],
+            "episode_wastes": [],
+            "episode_clearance": [],
+            "baseline_rewards": [],
+            "losses": agent.losses[-2000:] if hasattr(agent, 'losses') else offline_losses[-2000:],
+            "greedy_eval": [],
+            "best_reward": 0,
+            "early_stopped": False,
+            "early_stop_episode": None,
+            "timestamp": datetime.now().isoformat(),
+        }
+        with open(os.path.join(save_dir, f"training_history_{suffix}.json"), "w") as f:
+            json.dump(history, f, indent=2)
+
+        print(f"\n  [OFFLINE] Training complete — {offline_steps} gradient steps")
+        print(f"  Results saved to: {save_dir}/")
+
+        return agent, history
+
+    # ── Online training loop ──────────────────────────────────────────────
     episode_rewards = []
     episode_revenues = []
     episode_wastes = []

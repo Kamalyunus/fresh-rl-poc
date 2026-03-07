@@ -88,7 +88,7 @@ def _train_category_pooled(
     print(f"  [POOLED] {category}: {len(products)} products, "
           f"{episodes_per_sku} eps/SKU = {total_episodes} total, state_dim={state_dim}")
 
-    # Helper to create a fresh agent
+    # Helper to create a fresh agent (no epsilon needed — offline training)
     def _make_agent(reward_shaping, waste_cost_scale=None):
         return DQNAgent(
             state_dim=state_dim,
@@ -96,9 +96,9 @@ def _train_category_pooled(
             hidden_dim=hidden_dim,
             lr=5e-4,
             gamma=0.97,
-            epsilon_start=1.0,
-            epsilon_end=0.05,
-            epsilon_decay=epsilon_decay,
+            epsilon_start=0.0,
+            epsilon_end=0.0,
+            epsilon_decay=1.0,
             buffer_size=buffer_size,
             batch_size=batch_size,
             reward_shaping=reward_shaping,
@@ -112,101 +112,87 @@ def _train_category_pooled(
             tau_warmup_steps=tau_warmup_steps,
         )
 
-    # Collect transitions per product during plain variant training
-    from collections import defaultdict
-    transitions_by_product = defaultdict(list)
+    # Per-product transitions collected during prefill (shared across variants)
+    transitions_by_product = None
 
     for variant, shaping in [("plain", False), ("shaped", True)]:
-        # Compute initial waste_cost_scale from first product (will be updated per-episode)
+        # Compute waste_cost_scale from first product
         first_env = env._envs[products[0]]
         revenue_scale = first_env.base_price * first_env.initial_inventory
         waste_cost_scale = shaping_ratio * revenue_scale if shaping else None
 
         agent = _make_agent(reward_shaping=shaping, waste_cost_scale=waste_cost_scale)
 
-        # Prefill
+        # Prefill (offline data source — replaces the entire online training loop)
+        collect_this_time = (variant == "plain" and transitions_by_product is None)
         if prefill:
             print(f"    [{variant}] Prefilling {prefill_episodes} eps/product...")
-            n_trans = pooled_prefill(
+            result = pooled_prefill(
                 env, agent, episodes_per_product=prefill_episodes,
                 products=products, seed=seed,
+                collect_per_product=collect_this_time,
             )
+            if collect_this_time:
+                n_trans, transitions_by_product = result
+            else:
+                n_trans = result
             print(f"    [{variant}] Added {n_trans} transitions")
 
-        # Warmup
-        if warmup_steps > 0 and len(agent.replay_buffer) >= agent.batch_size:
-            print(f"    [{variant}] Warming up {warmup_steps} steps...")
-            for step in range(warmup_steps):
+        # Offline gradient steps (replaces warmup + online training loop)
+        offline_steps = len(agent.replay_buffer)
+        if offline_steps > 0 and len(agent.replay_buffer) >= agent.batch_size:
+            print(f"    [{variant}] [OFFLINE] Running {offline_steps} gradient steps...")
+            for step in range(offline_steps):
                 agent.train_step_fn()
-
-        # Training: round-robin through products
-        collect_transitions = (variant == "plain")
-        for ep in range(total_episodes):
-            product = products[ep % len(products)]
-            inner_env = env._envs[product]
-
-            # Update waste_cost_scale per-product for shaped variant
-            if shaping:
-                rev_scale = inner_env.base_price * inner_env.initial_inventory
-                agent.waste_cost_scale = shaping_ratio * rev_scale
-
-            obs, _ = env.reset(
-                seed=seed + ep,
-                options={"product": product},
-            )
-            done = False
-
-            while not done:
-                mask = env.action_masks()
-                action = agent.select_action(obs, action_mask=mask)
-                next_obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                next_mask = env.action_masks() if not done else np.ones(n_actions, dtype=bool)
-
-                # Collect raw transitions for per-SKU TL prefill (plain only)
-                if collect_transitions:
-                    transitions_by_product[product].append(
-                        (obs.copy(), action, reward, next_obs.copy(), done, next_mask.copy())
-                    )
-
-                agent.store_transition(obs, action, reward, next_obs, done, next_mask)
-                for _ in range(replay_ratio):
-                    agent.train_step_fn()
-                obs = next_obs
-
-            agent.decay_epsilon()
-
-            if (ep + 1) % 500 == 0:
-                print(f"    [{variant}] {category}: ep {ep+1}/{total_episodes}, eps={agent.epsilon:.3f}")
+                if (step + 1) % 5000 == 0:
+                    print(f"    [{variant}] {category}: step {step+1}/{offline_steps}")
+            print(f"    [{variant}] [OFFLINE] Done")
 
         # Save model
         model_path = os.path.join(cat_dir, f"pooled_{category}_{variant}_{step_hours}h.pt")
         agent.save(model_path)
         print(f"    [{variant}] Saved: {model_path}")
 
-        # Save per-product transitions after plain variant training
-        if collect_transitions and transitions_by_product:
-            trans_dir = os.path.join(cat_dir, "transitions")
-            os.makedirs(trans_dir, exist_ok=True)
-            for prod, trans_list in transitions_by_product.items():
-                states, actions, rewards, next_states, dones, masks = zip(*trans_list)
-                np.savez_compressed(os.path.join(trans_dir, f"{prod}.npz"),
-                    states=np.array(states, dtype=np.float32),
-                    actions=np.array(actions, dtype=np.int64),
-                    rewards=np.array(rewards, dtype=np.float32),
-                    next_states=np.array(next_states, dtype=np.float32),
-                    dones=np.array(dones, dtype=bool),
-                    masks=np.array(masks, dtype=bool),
-                )
-            print(f"    [plain] Saved transitions for {len(transitions_by_product)} products to {trans_dir}")
+    # Save per-product transitions from prefill (baseline data for TL)
+    if transitions_by_product:
+        trans_dir = os.path.join(cat_dir, "transitions")
+        os.makedirs(trans_dir, exist_ok=True)
+        for prod, trans_list in transitions_by_product.items():
+            states, actions, rewards, next_states, dones, masks = zip(*trans_list)
+            np.savez_compressed(os.path.join(trans_dir, f"{prod}.npz"),
+                states=np.array(states, dtype=np.float32),
+                actions=np.array(actions, dtype=np.int64),
+                rewards=np.array(rewards, dtype=np.float32),
+                next_states=np.array(next_states, dtype=np.float32),
+                dones=np.array(dones, dtype=bool),
+                masks=np.array(masks, dtype=bool),
+            )
+        print(f"    [OFFLINE] Saved transitions for {len(transitions_by_product)} products to {trans_dir}")
 
-        if variant == "plain":
-            agent_plain = agent
-        else:
-            agent_shaped = agent
-
-    print(f"  [POOLED] {category}: training complete — checkpoints saved")
+    print(f"  [POOLED] {category}: offline training complete — checkpoints saved")
     return []
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+def _greedy_backtest_baseline(policy, product, env_kwargs, n_episodes, seed):
+    """Run a baseline policy on deterministic seeds, return per-episode rewards."""
+    from fresh_rl.environment import MarkdownProductEnv
+    from fresh_rl.pooled_env import AugmentedProductEnv
+    env = MarkdownProductEnv(**env_kwargs)
+    # Use base env for baseline (baselines don't need augmented state)
+    rewards = []
+    for ep in range(n_episodes):
+        obs, _ = env.reset(seed=seed + ep)
+        total = 0.0
+        done = False
+        while not done:
+            action = policy.select_action(obs, env=env)
+            obs, r, term, trunc, info = env.step(action)
+            done = term or trunc
+            total += r
+        rewards.append(total)
+    return rewards
 
 
 # ── Single-product pipeline (runs in worker process) ─────────────────────
@@ -242,12 +228,13 @@ def _run_single_product(
     tl_epsilon_start: float = None,
     tl_epsilon_decay: float = None,
     early_stop_patience: int = None,
+    offline_steps: int = 0,
 ):
     """Train plain + shaped DQN for one product, evaluate, return summary dict.
 
-    2-phase pipeline (v4.2):
-      Phase 1: Train plain + shaped variants with per-episode baseline replay
-      Phase 2: Deploy best variant on fresh demand seeds with low epsilon
+    2-phase pipeline:
+      Phase 1: Offline training on pooled + baseline transitions (no env interaction)
+      Phase 2: Online deployment with fresh demand seeds (low epsilon)
     """
     # Imports inside worker to avoid pickling issues
     from scripts.train import train
@@ -271,7 +258,8 @@ def _run_single_product(
         base_inv = profile.get("initial_inventory", 20)
         env_overrides["initial_inventory"] = int(base_inv * inventory_mult)
 
-    per_kwargs = dict(
+    # Phase 1 kwargs: offline training (no epsilon, no baseline replay, no early stopping)
+    phase1_kwargs = dict(
         use_per=use_per,
         prefill=prefill,
         prefill_episodes=prefill_episodes,
@@ -291,11 +279,9 @@ def _run_single_product(
         tau_end=tau_end,
         tau_warmup_steps=tau_warmup_steps,
         tl_warmup_steps=tl_warmup_steps,
-        tl_epsilon_start=tl_epsilon_start,
-        tl_epsilon_decay=tl_epsilon_decay,
-        early_stop_patience=early_stop_patience,
-        greedy_eval_n=0,  # Use rolling win rate for checkpoint selection, not simulator greedy eval
+        greedy_eval_n=0,
         prefill_transitions_path=prefill_transitions_path,
+        offline_steps=offline_steps,
     )
 
     effective_inv = int(profile.get("initial_inventory", 20) * inventory_mult)
@@ -367,7 +353,7 @@ def _run_single_product(
         result["best_baseline_revenue"] = best_bl["mean_revenue"]
         result["best_baseline_waste"] = best_bl["mean_waste_rate"]
 
-        # ── Step 2: Train with per-episode baseline replay ─────────────────
+        # ── Step 2: Phase 1 — Offline training on historical data ─────────
         agent_plain, hist_plain = train(
             n_episodes=episodes,
             product=product,
@@ -376,8 +362,7 @@ def _run_single_product(
             seed=seed,
             save_dir=product_dir,
             pretrained_path=pooled_tl_plain_path,
-            best_baseline=best_bl_policy,
-            **per_kwargs,
+            **phase1_kwargs,
         )
 
         agent_shaped, hist_shaped = train(
@@ -388,29 +373,55 @@ def _run_single_product(
             seed=seed,
             save_dir=product_dir,
             pretrained_path=pooled_tl_shaped_path,
-            best_baseline=best_bl_policy,
-            **per_kwargs,
+            **phase1_kwargs,
         )
 
-        # ── Step 3: Select best variant from Phase 1 training ─────────────
-        def _daily_metrics(hist):
-            ep_r = hist["episode_rewards"]
-            bl_r = hist["baseline_rewards"]
-            n = len(ep_r)
-            window = min(30, n)
-            last_ep = ep_r[-window:]
-            last_bl = bl_r[-window:]
-            wins = sum(1 for e, b in zip(last_ep, last_bl) if b is not None and e > b)
-            total = sum(1 for b in last_bl if b is not None)
-            win_rate = wins / total if total > 0 else 0
-            mean_reward = float(np.mean(last_ep))
-            mean_revenue = float(np.mean(hist["episode_revenues"][-window:]))
-            mean_waste = float(np.mean(hist["episode_wastes"][-window:]))
-            mean_clearance = float(np.mean(hist["episode_clearance"][-window:]))
-            return win_rate, mean_reward, mean_revenue, mean_waste, mean_clearance
+        # ── Step 3: Greedy backtest for variant selection ──────────────────
+        def _greedy_backtest(agent, prod, env_kw, n_eps, bt_seed):
+            """Run greedy agent on training seeds, return per-episode rewards."""
+            bt_env = MarkdownProductEnv(**env_kw)
+            from fresh_rl.pooled_env import AugmentedProductEnv
+            bt_env = AugmentedProductEnv(bt_env, prod, inventory_mult=inventory_mult)
+            agent.epsilon = 0.0
+            rewards = []
+            for ep in range(n_eps):
+                obs, _ = bt_env.reset(seed=bt_seed + ep)
+                total = 0.0
+                done = False
+                while not done:
+                    a = agent.select_action(obs, action_mask=bt_env.action_masks())
+                    obs, r, term, trunc, info = bt_env.step(a)
+                    done = term or trunc
+                    total += r
+                rewards.append(total)
+            return rewards
 
-        plain_wr, plain_mean, plain_rev, plain_wst, plain_clr = _daily_metrics(hist_plain)
-        shaped_wr, shaped_mean, shaped_rev, shaped_wst, shaped_clr = _daily_metrics(hist_shaped)
+        bt_env_kwargs = dict(product_name=product, step_hours=step_hours, seed=seed)
+        if env_overrides:
+            bt_env_kwargs.update(env_overrides)
+
+        plain_rewards = _greedy_backtest(agent_plain, product, bt_env_kwargs, episodes, seed)
+        shaped_rewards = _greedy_backtest(agent_shaped, product, bt_env_kwargs, episodes, seed)
+
+        # Compare vs baseline per-episode rewards (from baseline eval)
+        bl_per_episode = best_bl.get("per_episode_rewards")
+        if bl_per_episode is None:
+            # Run baseline on same seeds to get per-episode rewards
+            bl_per_episode = _greedy_backtest_baseline(best_bl_policy, product, bt_env_kwargs, episodes, seed)
+
+        def _compute_metrics(dqn_rewards, bl_rewards):
+            n = min(len(dqn_rewards), len(bl_rewards))
+            wins = sum(1 for d, b in zip(dqn_rewards[:n], bl_rewards[:n]) if d > b)
+            win_rate = wins / n if n > 0 else 0
+            mean_reward = float(np.mean(dqn_rewards))
+            return win_rate, mean_reward
+
+        plain_wr, plain_mean = _compute_metrics(plain_rewards, bl_per_episode)
+        shaped_wr, shaped_mean = _compute_metrics(shaped_rewards, bl_per_episode)
+
+        # Fill in revenue/waste/clearance as 0 (not tracked in offline backtest)
+        plain_rev = plain_wst = plain_clr = 0.0
+        shaped_rev = shaped_wst = shaped_clr = 0.0
 
         result["plain_reward"] = plain_mean
         result["plain_revenue"] = plain_rev
@@ -488,6 +499,22 @@ def _run_single_product(
         )
 
         # ── Step 5: Derive final metrics from Phase 2 deployment ──────
+        def _daily_metrics(hist):
+            ep_r = hist["episode_rewards"]
+            bl_r = hist["baseline_rewards"]
+            n = len(ep_r)
+            window = min(30, n)
+            last_ep = ep_r[-window:]
+            last_bl = bl_r[-window:]
+            wins = sum(1 for e, b in zip(last_ep, last_bl) if b is not None and e > b)
+            total = sum(1 for b in last_bl if b is not None)
+            win_rate = wins / total if total > 0 else 0
+            mean_reward = float(np.mean(last_ep))
+            mean_revenue = float(np.mean(hist["episode_revenues"][-window:]))
+            mean_waste = float(np.mean(hist["episode_wastes"][-window:]))
+            mean_clearance = float(np.mean(hist["episode_clearance"][-window:]))
+            return win_rate, mean_reward, mean_revenue, mean_waste, mean_clearance
+
         deploy_wr, deploy_mean, deploy_rev, deploy_wst, deploy_clr = _daily_metrics(hist_deploy)
 
         result["beats_baseline"] = deploy_wr > 0.5
@@ -637,7 +664,7 @@ def _load_config(config_path: str) -> dict:
 
     # Top-level scalars
     for key in ("episodes", "eval_episodes", "step_hours", "seed", "workers",
-                "save_dir", "pooled_model_dir"):
+                "save_dir", "pooled_model_dir", "offline_steps"):
         if key in cfg:
             flat[key] = cfg[key]
 
@@ -757,6 +784,10 @@ def main():
     parser.add_argument("--early-stop-patience", type=int, default=None,
                         help="Stop training after this many episodes without greedy reward improvement (default: disabled)")
 
+    # Offline training
+    parser.add_argument("--offline-steps", type=int, default=-1,
+                        help="Phase 1 offline gradient steps (-1=auto from buffer size, 0=online, >0=explicit)")
+
     # Pooled category training
     parser.add_argument("--pooled", action="store_true",
                         help="Train 7 category-level pooled models instead of 150 per-SKU models")
@@ -841,7 +872,11 @@ def main():
         print(f"  Pooled mode:    ON ({args.pooled_episodes_per_sku} eps/SKU)")
     if args.pooled_tl:
         print(f"  Pooled TL:      ON (from {args.pooled_model_dir})")
-        print(f"  TL epsilon:     {args.tl_epsilon_start} (decay: {args.tl_epsilon_decay})")
+        if args.offline_steps > 0:
+            print(f"  Phase 1:        OFFLINE ({args.offline_steps} gradient steps)")
+        elif args.offline_steps == -1:
+            print(f"  Phase 1:        OFFLINE (auto from buffer size)")
+        print(f"  Phase 2 eps:    {args.tl_epsilon_start} (decay: {args.tl_epsilon_decay})")
     if args.early_stop_patience is not None:
         print(f"  Early stopping: patience={args.early_stop_patience} episodes")
     print(f"  Workers:        {args.workers}")
@@ -980,6 +1015,7 @@ def main():
         tl_epsilon_start=args.tl_epsilon_start,
         tl_epsilon_decay=args.tl_epsilon_decay,
         early_stop_patience=args.early_stop_patience,
+        offline_steps=args.offline_steps,
     )
 
     all_results = []

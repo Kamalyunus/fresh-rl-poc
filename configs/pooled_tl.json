@@ -1,11 +1,12 @@
 {
   "mode": "pooled-tl",
-  "description": "2-phase pipeline: pooled weights -> per-SKU fine-tuning -> deployment eval",
+  "description": "2-phase pipeline: offline Phase 1 (pooled + baseline data) -> online Phase 2 deployment",
 
   "episodes": 365,
   "step_hours": 2,
   "save_dir": "results/pooled_tl",
   "pooled_model_dir": "results/pooled",
+  "offline_steps": -1,
 
   "dqn": {
     "hidden_dim": 128,
@@ -37,7 +38,7 @@
   },
 
   "transfer_learning": {
-    "tl_epsilon_start": 0.20,
+    "tl_epsilon_start": 0.05,
     "tl_epsilon_decay": null,
     "tl_warmup_steps": 200
   }

@@ -171,7 +171,8 @@ class PooledCategoryEnv(gym.Env):
         return getattr(self._active_env, name)
 
 
-def pooled_prefill(env, agent, episodes_per_product, products, seed=42):
+def pooled_prefill(env, agent, episodes_per_product, products, seed=42,
+                   collect_per_product=False):
     """Pre-fill replay buffer with baseline policy transitions through a PooledCategoryEnv.
 
     Runs baseline policies (from DEFAULT_BASELINE_MIX) across all products,
@@ -189,11 +190,14 @@ def pooled_prefill(env, agent, episodes_per_product, products, seed=42):
         Product names to prefill.
     seed : int
         Random seed.
+    collect_per_product : bool
+        When True, also collect raw transitions per product (for TL prefill later).
 
     Returns
     -------
-    int
-        Total transitions added.
+    int or (int, dict)
+        Total transitions added. If collect_per_product=True, also returns
+        dict mapping product name -> list of (obs, action, reward, next_obs, done, mask).
     """
     from fresh_rl.baselines import (
         LinearProgressive,
@@ -220,6 +224,9 @@ def pooled_prefill(env, agent, episodes_per_product, products, seed=42):
         agent.replay_buffer.max_priority = 5.0
 
     total_transitions = 0
+    if collect_per_product:
+        from collections import defaultdict
+        transitions_by_product = defaultdict(list)
 
     for product in products:
         for ep in range(episodes_per_product):
@@ -227,8 +234,9 @@ def pooled_prefill(env, agent, episodes_per_product, products, seed=42):
             idx = rng.choice(len(baselines), p=weights)
             policy = baselines[idx]
 
+            # Deterministic seed: seed + ep per product (matches training seed pattern)
             obs, _ = env.reset(
-                seed=int(rng.integers(0, 100000)),
+                seed=seed + ep,
                 options={"product": product},
             )
             done = False
@@ -246,9 +254,17 @@ def pooled_prefill(env, agent, episodes_per_product, products, seed=42):
 
                 agent.store_transition(obs, action, reward, next_obs, done, next_mask)
                 total_transitions += 1
+
+                if collect_per_product:
+                    transitions_by_product[product].append(
+                        (obs.copy(), action, reward, next_obs.copy(), done, next_mask.copy())
+                    )
+
                 obs = next_obs
 
     if has_per:
         agent.replay_buffer.max_priority = old_max
 
+    if collect_per_product:
+        return total_transitions, dict(transitions_by_product)
     return total_transitions
