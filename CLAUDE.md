@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 RL-based progressive markdown pricing for perishable products. Double DQN agents learn to price 150 SKUs across 7 categories on an ecommerce markdown channel, outperforming rule-based baselines on reward (revenue - waste).
 
 Two training modes:
-- **Pooled TL (v4.3)**: Pooled model weights as initialization for per-SKU fine-tuning, 14-dim state. 2-phase pipeline with greedy deployment.
-- **Pooled (v2)**: 7 category-level models, 14-dim state (10 base + 4 product features), generates checkpoints for TL
+- **Pooled TL (v5.0)**: 2-phase pipeline — offline Phase 1 (gradient steps on baseline data, no env interaction) + online Phase 2 deployment (eps=0.05). Pooled model weights initialize per-SKU fine-tuning. 14-dim state.
+- **Pooled (v5.0)**: 7 category-level models trained offline on baseline data, 14-dim state (10 base + 4 product features), generates checkpoints for TL
 
 ## Common Commands
 
@@ -97,7 +97,10 @@ deployment/
 - **Pooled training**: `PooledCategoryEnv` holds one `MarkdownProductEnv` per SKU. `reset(options={"product": name})` switches active product. `__getattr__` delegates to active env so baselines work unchanged.
 - **Pooled TL (v2.1)**: `AugmentedProductEnv` wraps per-SKU env to append 4 product features (10->14 dim), matching pooled model input. Pooled weights transfer directly via `load_pretrained()` — no weight surgery needed.
 - **Evaluation (greedy)**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Used for baseline identification in pooled-TL pipeline.
-- **Evaluation (2-phase, v4.3)**: Phase 1 (Historical) trains plain + shaped DQN on 365 episodes, evaluates baselines on the same seeds, picks best variant by rolling win rate. Phase 2 (Deployment) loads best checkpoint, runs 365 fresh episodes (seed + 10000) with epsilon=0.0 (greedy). Checkpoint selection uses rolling win rate (production-realistic), not multi-episode greedy eval. `beats_baseline` = Phase 2 last-30-day win rate > 50%. Saves `eval_deployment.json` per product.
+- **Offline training (v5.0)**: `offline_steps` param in `train()` runs gradient steps on buffered data instead of online episodes. `-1` = auto-compute from buffer size (1 epoch). Used for both pooled category training and TL Phase 1. No epsilon decay, no baseline replay during offline training.
+- **Pooled prefill with per-product collection**: `pooled_prefill(collect_per_product=True)` returns per-product transitions alongside total count. Transitions saved to `_pooled_{cat}/transitions/` for per-SKU TL fine-tuning. Uses deterministic seeds (`seed + ep`).
+- **Greedy backtest**: `_greedy_backtest()` runs trained agents greedily on 365 training seeds after offline Phase 1 to select best variant (plain vs shaped). `_greedy_backtest_baseline()` runs the best baseline on same seeds for comparison. Replaces online reward comparison which isn't available in offline mode.
+- **2-phase pipeline (v5.0)**: Phase 1 (offline) loads pooled transitions, runs N gradient steps, saves checkpoint. Phase 2 (online) loads best Phase 1 checkpoint, runs 365 fresh episodes (seed + 10000) with epsilon=0.05. Buffer carried from Phase 1 to Phase 2. `beats_baseline` = Phase 2 last-30-day win rate > 50%. Saves `eval_deployment.json` per product.
 - **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either. v4.2+ results include `best_win_rate`, `best_variant`, `deploy_mean_reward`.
 - **Model metrics**: `compute_avg_q()` and `mean_loss` tracked as proxy quality signals in production (no simulator). Written to `metrics.json` alongside checkpoints.
 - **Safety rollback**: Auto-reverts to `agent_prev.pt` when avg_q drops >30% or loss spikes >3x. Resets epsilon to 0.15 for re-exploration.
@@ -122,7 +125,7 @@ deployment/
 
 - **DEPLOYMENT.md** — Production deployment guide: data requirements, state vector construction, historical prefill pipeline, online RL architecture, rollout phases, safety guardrails, monitoring, and maintenance.
 - **ARCHITECTURE.md** — Technical architecture deep-dive: MDP formulation, algorithms, data structures, training pipeline.
-- **EXPERIMENTS.md** — Full experiment log (25 iterations from v1.0 through v4.2, production hardening, time-to-value visualization, and 2-phase production-realistic evaluation).
+- **EXPERIMENTS.md** — Full experiment log (27 iterations from v1.0 through v5.0, production hardening, time-to-value visualization, offline training, and 2-phase production-realistic evaluation).
 
 ## Results Directory Structure
 
@@ -154,4 +157,13 @@ results/portfolio_v42_2phase_eval/     — v4.2 TL results (57%, 2-phase product
 
 results/portfolio_v2_pooled/           — Pooled category models (v2, 78%)
   _pooled_{category}/                  — Category model checkpoints (.pt, used by TL)
+
+results/portfolio_v50_offline_pooled/  — v5.0 offline pooled models
+  _pooled_{category}/                  — Category model checkpoints (.pt)
+  _pooled_{category}/transitions/      — Per-product transitions for TL
+
+results/portfolio_v50_offline_pooled_tl/ — v5.0 offline TL results (65%)
+  portfolio_results.json               — All 150 SKU results
+  {product_name}/eval_deployment.json  — Phase 2 deployment DQN + baseline reward arrays
+  {product_name}/deploy/               — Phase 2 training files
 ```
