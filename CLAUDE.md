@@ -96,7 +96,7 @@ deployment/
 - **N-step returns**: `NStepAccumulator` sits between `store_transition()` and replay buffer. Flushes at episode boundaries. Compatible with PER and shaping.
 - **Pooled training**: `PooledCategoryEnv` holds one `MarkdownProductEnv` per SKU. `reset(options={"product": name})` switches active product. `__getattr__` delegates to active env so baselines work unchanged.
 - **Pooled TL (v2.1)**: `AugmentedProductEnv` wraps per-SKU env to append 4 product features (10->14 dim), matching pooled model input. Pooled weights transfer directly via `load_pretrained()` — no weight surgery needed.
-- **Evaluation (greedy)**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Used for baseline identification and pooled mode eval.
+- **Evaluation (greedy)**: `evaluate_policy()` in `scripts/evaluate.py` runs greedy rollouts. Used for baseline identification in pooled-TL pipeline.
 - **Evaluation (2-phase, v4.3)**: Phase 1 (Historical) trains plain + shaped DQN on 365 episodes, evaluates baselines on the same seeds, picks best variant by rolling win rate. Phase 2 (Deployment) loads best checkpoint, runs 365 fresh episodes (seed + 10000) with epsilon=0.0 (greedy). Checkpoint selection uses rolling win rate (production-realistic), not multi-episode greedy eval. `beats_baseline` = Phase 2 last-30-day win rate > 50%. Saves `eval_deployment.json` per product.
 - **Results format**: `portfolio_results.json` has same schema for both modes — `visualize.py` works on either. v4.2+ results include `best_win_rate`, `best_variant`, `deploy_mean_reward`.
 - **Model metrics**: `compute_avg_q()` and `mean_loss` tracked as proxy quality signals in production (no simulator). Written to `metrics.json` alongside checkpoints.

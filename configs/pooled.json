@@ -3,7 +3,6 @@
   "description": "Train 7 category-level pooled models on historical data (generates checkpoints for TL)",
 
   "episodes_per_sku": 365,
-  "eval_episodes": 100,
   "save_dir": "results/pooled",
 
   "dqn": {
